@@ -29,6 +29,7 @@
 #include <memory>
 #include <stack>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -338,6 +339,152 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBest(size_t k) {
     results.push_back(std::move(result));
   }
   return results;
+}
+
+namespace {
+// Splits UTF-8 into per-code-point strings (invalid lead bytes become
+// one-byte pieces).
+void SplitCodePoints(const std::string& s, std::vector<std::string>* out) {
+  out->clear();
+  size_t i = 0;
+  while (i < s.size()) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t n = c < 0x80                ? 1
+               : (c >> 5) == 0x6       ? 2
+               : (c >> 4) == 0xE       ? 3
+               : (c >> 3) == 0x1E      ? 4
+                                       : 1;
+    if (i + n > s.size()) {
+      n = 1;
+    }
+    out->push_back(s.substr(i, n));
+    i += n;
+  }
+}
+}  // namespace
+
+ReadingGrid::WalkResult ReadingGrid::walkWithCharBonus(
+    double alpha, const PositionalCharScores& scores) {
+  const size_t readingLen = readings_.size();
+  if (spans_.empty() || scores.table.size() != readingLen) {
+    return walk();
+  }
+  int64_t start = GetEpochNowInMicroseconds();
+
+  struct State {
+    size_t fromIndex = 0;
+    NodePtr fromNode = nullptr;
+    size_t unigramIndex = 0;
+    bool useCurrent = true;  // keep the node's current unigram (no copy)
+    double maxScore = -std::numeric_limits<double>::infinity();
+  };
+  std::vector<State> viterbi(readingLen + 1);
+  viterbi[0].maxScore = 0.0;
+
+  size_t reachableStates = 0;
+  size_t evaluatedEdges = 0;
+  std::vector<std::string> chars;
+  for (size_t i = 0; i < readingLen; ++i) {
+    ++reachableStates;
+    const Span& span = spans_[i];
+    for (size_t spanLen = 1; spanLen <= span.maxLength(); ++spanLen) {
+      const NodePtr& node = span.nodeOf(spanLen);
+      if (node == nullptr) {
+        continue;
+      }
+      ++evaluatedEdges;
+
+      // Best unigram of this node under the bonus. Overridden or empty nodes
+      // keep stock semantics.
+      double best = node->score();
+      size_t bestIndex = 0;
+      bool useCurrent = true;
+      const auto& unigrams = node->unigrams();
+      if (!node->isOverridden() && !unigrams.empty()) {
+        best = -std::numeric_limits<double>::infinity();
+        for (size_t u = 0; u < unigrams.size(); ++u) {
+          double bonus = 0;
+          if (alpha != 0) {
+            SplitCodePoints(unigrams[u].value(), &chars);
+            for (size_t j = 0; j < chars.size(); ++j) {
+              const size_t pos = i + j;
+              if (pos >= readingLen) {
+                bonus += scores.missingScore;
+                continue;
+              }
+              const auto& m = scores.table[pos];
+              auto it = m.find(chars[j]);
+              bonus += it == m.end() ? scores.missingScore : it->second;
+            }
+          }
+          double x = unigrams[u].score() + alpha * bonus;
+          if (x > best) {
+            best = x;
+            bestIndex = u;
+          }
+        }
+        useCurrent = unigrams[bestIndex].value() == node->value() &&
+                     unigrams[bestIndex].score() == node->score();
+      }
+
+      double score = viterbi[i].maxScore + best;
+      State& target = viterbi[i + spanLen];
+      if (score > target.maxScore) {
+        target.maxScore = score;
+        target.fromNode = node;
+        target.fromIndex = i;
+        target.unigramIndex = bestIndex;
+        target.useCurrent = useCurrent;
+      }
+    }
+  }
+
+  WalkResult result;
+  result.vertices = reachableStates;
+  result.edges = evaluatedEdges;
+  result.score = viterbi[readingLen].maxScore;
+  size_t totalReadingLen = 0;
+  for (size_t curr = readingLen; curr > 0; curr = viterbi[curr].fromIndex) {
+    State& st = viterbi[curr];
+    assert(st.fromNode != nullptr);
+    NodePtr node = st.fromNode;
+    if (!st.useCurrent) {
+      node = std::make_shared<Node>(*node);
+      node->selectUnigramAt(st.unigramIndex);
+    }
+    totalReadingLen += node->spanningLength();
+    result.nodes.push_back(std::move(node));
+  }
+  std::reverse(result.nodes.begin(), result.nodes.end());
+  assert(totalReadingLen == readingLen);
+  result.totalReadings = totalReadingLen;
+  result.elapsedMicroseconds = GetEpochNowInMicroseconds() - start;
+  return result;
+}
+
+std::vector<std::vector<std::string>> ReadingGrid::charsAtPositions() const {
+  const size_t n = readings_.size();
+  std::vector<std::vector<std::string>> out(n);
+  std::vector<std::unordered_set<std::string>> seen(n);
+  std::vector<std::string> chars;
+  for (size_t i = 0; i < spans_.size() && i < n; ++i) {
+    const Span& span = spans_[i];
+    for (size_t len = 1; len <= span.maxLength(); ++len) {
+      const NodePtr& node = span.nodeOf(len);
+      if (node == nullptr) {
+        continue;
+      }
+      for (const auto& u : node->unigrams()) {
+        SplitCodePoints(u.value(), &chars);
+        for (size_t j = 0; j < chars.size() && i + j < n; ++j) {
+          if (seen[i + j].insert(chars[j]).second) {
+            out[i + j].push_back(chars[j]);
+          }
+        }
+      }
+    }
+  }
+  return out;
 }
 
 std::vector<ReadingGrid::Candidate> ReadingGrid::candidatesAt(size_t loc) {

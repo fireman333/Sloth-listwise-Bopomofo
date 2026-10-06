@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "rescorer.h"
@@ -40,6 +41,21 @@ class SlothRescorer : public Rescorer {
 
   bool ready() const override;
   std::vector<double> score(const RescoreRequest& request) override;
+
+  // Per-position character log-probabilities for in-walk scoring (R-walk).
+  // result[t] maps each character legal for readings[t] (phonetic_table.tsv),
+  // plus every in-vocabulary character of extraChars[t] when given, to
+  //   log p(char | all readings) = logit[t, char] - logsumexp over that set.
+  // For a syllable with no legal set the normaliser is the full vocabulary and
+  // only extraChars[t] are listed. Characters outside the model vocabulary are
+  // never listed (callers apply their own missing-character penalty, -30 in
+  // the reference). One forward pass, hints = 0. Same normaliser as score()
+  // when extraChars carries the candidate characters. Returns an empty vector
+  // on failure or when not ready (callers fall back to the plain walk).
+  using CharLogProbTable = std::vector<std::unordered_map<std::string, double>>;
+  CharLogProbTable charLogProbs(
+      const std::vector<std::string>& readings,
+      const std::vector<std::vector<std::string>>* extraChars = nullptr);
 
  private:
   struct Impl;

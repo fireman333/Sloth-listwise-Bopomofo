@@ -182,6 +182,10 @@ if (RESCORER_BENCH AND (RESCORER_SLOTH OR RESCORER_QWEN))
         add_subdirectory("${_engine_dir}" "${CMAKE_CURRENT_BINARY_DIR}/engine" EXCLUDE_FROM_ALL)
         set(ENABLE_TEST "${_saved_enable_test}")
     endif ()
+    if (NOT LLAMA_CPP_ROOT)
+        # nlohmann/json.hpp is taken from llama.cpp's vendor dir even without Qwen.
+        set(LLAMA_CPP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/llama.cpp")
+    endif ()
     add_executable(rescorer_bench tools/rescorer_bench.cpp)
     target_include_directories(rescorer_bench PRIVATE
         "${_engine_dir}" "${_engine_dir}/gramambular2" "${CMAKE_CURRENT_LIST_DIR}"
@@ -206,4 +210,33 @@ if (RESCORER_BENCH AND (RESCORER_SLOTH OR RESCORER_QWEN))
         target_link_libraries(rescorer_bench PRIVATE qwen_rescorer)
         target_compile_definitions(rescorer_bench PRIVATE RESCORER_BENCH_WITH_QWEN)
     endif ()
+endif ()
+
+# ---------------------------------------------------------------------------
+# NeuralWalk (R-walk, neural_walk.h) test: real McBopomofo LM + SlothLM-E
+# ranker export. RWALK_MODEL_DIR can point at any export dir with the same
+# layout (e.g. train/ranker/export/clean_v1).
+# ---------------------------------------------------------------------------
+if (ENABLE_TEST AND RESCORER_SLOTH)
+    set(_engine_dir "${CMAKE_CURRENT_LIST_DIR}/..")
+    if (NOT TARGET McBopomofoLMLib)
+        set(_saved_enable_test "${ENABLE_TEST}")
+        set(ENABLE_TEST OFF)
+        add_subdirectory("${_engine_dir}" "${CMAKE_CURRENT_BINARY_DIR}/engine" EXCLUDE_FROM_ALL)
+        set(ENABLE_TEST "${_saved_enable_test}")
+    endif ()
+    set(RWALK_MODEL_DIR
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../train/ranker/export/v2_listmle05_goldmle"
+        CACHE PATH "SlothLM-E ranker export dir used by neural_walk_test")
+    add_executable(neural_walk_test neural_walk_test.cpp neural_walk.h)
+    target_include_directories(neural_walk_test PRIVATE "${_engine_dir}" "${_engine_dir}/gramambular2")
+    target_link_libraries(neural_walk_test sloth_rescorer McBopomofoLMLib gramambular2_lib GTest::gtest_main)
+    target_compile_definitions(neural_walk_test PRIVATE
+        RWALK_MODEL_DIR="${RWALK_MODEL_DIR}"
+        RWALK_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/rwalk_fixture.tsv"
+        DATA_TXT="${_engine_dir}/../Data/data.txt")
+    set_target_properties(neural_walk_test PROPERTIES
+        BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+    include(GoogleTest)
+    gtest_discover_tests(neural_walk_test DISCOVERY_MODE PRE_TEST)
 endif ()

@@ -22,3 +22,4 @@ build-xcode/
 build-rescorer-*/
 27.0-*/
 build-bench/
+build-walk/

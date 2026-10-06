@@ -196,6 +196,7 @@ struct SlothRescorer::Impl {
   std::unique_ptr<Ort::Session> session;
   std::unordered_map<std::string, int64_t> sylId;   // syllable -> input id
   std::unordered_map<std::string, int64_t> charId;  // char -> output id
+  std::vector<std::string> idChar;                   // output id -> char
   std::unordered_map<std::string, std::vector<int64_t>> legal;  // sorted unique
   bool ready = false;
 
@@ -220,6 +221,12 @@ struct SlothRescorer::Impl {
         }
       }
       if (charId.empty()) throw std::runtime_error("empty char vocab");
+      for (const auto& kv : charId) {
+        if (kv.second < 0) continue;
+        size_t id = static_cast<size_t>(kv.second);
+        if (id >= idChar.size()) idChar.resize(id + 1);
+        idChar[id] = kv.first;
+      }
     }
     {
       std::ifstream in(dir + "/phonetic_table.tsv");
@@ -250,16 +257,13 @@ struct SlothRescorer::Impl {
     ready = true;
   }
 
-  std::vector<double> Score(const RescoreRequest& req) {
-    const size_t T = req.readings.size();
-    const size_t N = req.candidates.size();
-    if (T == 0) return {};
-    if (N == 0) return {};
-
-    // Forward pass (batch of 1).
+  // One forward pass (batch of 1, hints = 0). Returns false on shape error.
+  bool Forward(const std::vector<std::string>& readings, std::vector<Ort::Value>* outs,
+               size_t* V) {
+    const size_t T = readings.size();
     std::vector<int64_t> syl(T);
     for (size_t t = 0; t < T; ++t) {
-      auto it = sylId.find(req.readings[t]);
+      auto it = sylId.find(readings[t]);
       syl[t] = it == sylId.end() ? 1 : it->second;  // 1 == <unk>
     }
     // std::vector<bool> has no data(); use a plain array.
@@ -274,11 +278,74 @@ struct SlothRescorer::Impl {
         Ort::Value::CreateTensor<int64_t>(mem, hints.data(), T, shape, 2)};
     const char* inNames[3] = {"syl", "amask", "hints"};
     const char* outNames[1] = {"logits"};
-    auto outs = session->Run(Ort::RunOptions{nullptr}, inNames, inputs, 3, outNames, 1);
-    auto info = outs[0].GetTensorTypeAndShapeInfo();
-    auto oshape = info.GetShape();
-    if (oshape.size() != 3 || oshape[1] != static_cast<int64_t>(T)) return {};
-    const size_t V = static_cast<size_t>(oshape[2]);
+    *outs = session->Run(Ort::RunOptions{nullptr}, inNames, inputs, 3, outNames, 1);
+    auto oshape = (*outs)[0].GetTensorTypeAndShapeInfo().GetShape();
+    if (oshape.size() != 3 || oshape[1] != static_cast<int64_t>(T)) return false;
+    *V = static_cast<size_t>(oshape[2]);
+    return true;
+  }
+
+  SlothRescorer::CharLogProbTable CharLogProbs(
+      const std::vector<std::string>& readings,
+      const std::vector<std::vector<std::string>>* extraChars) {
+    const size_t T = readings.size();
+    if (T == 0) return {};
+    if (extraChars != nullptr && extraChars->size() != T) return {};
+    std::vector<Ort::Value> outs;
+    size_t V = 0;
+    if (!Forward(readings, &outs, &V)) return {};
+    const float* lg = outs[0].GetTensorData<float>();
+
+    SlothRescorer::CharLogProbTable table(T);
+    std::vector<int64_t> ids;
+    for (size_t t = 0; t < T; ++t) {
+      const float* row = lg + t * V;
+      auto lit = legal.find(readings[t]);
+      const bool full = lit == legal.end();
+      ids.clear();
+      if (!full) ids = lit->second;
+      if (extraChars != nullptr) {
+        for (const auto& c : (*extraChars)[t]) {
+          auto it = charId.find(c);
+          if (it != charId.end()) ids.push_back(it->second);
+        }
+      }
+      std::sort(ids.begin(), ids.end());
+      ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+      double m = -INFINITY;
+      auto valid = [&](int64_t id) { return id >= 0 && static_cast<size_t>(id) < V; };
+      if (full) {
+        for (size_t id = 0; id < V; ++id) m = std::max(m, static_cast<double>(row[id]));
+      } else {
+        for (int64_t id : ids) if (valid(id)) m = std::max(m, static_cast<double>(row[id]));
+      }
+      if (!std::isfinite(m)) continue;
+      double sum = 0;
+      if (full) {
+        for (size_t id = 0; id < V; ++id) sum += std::exp(static_cast<double>(row[id]) - m);
+      } else {
+        for (int64_t id : ids) if (valid(id)) sum += std::exp(static_cast<double>(row[id]) - m);
+      }
+      const double lse = m + std::log(sum);
+      auto& out = table[t];
+      out.reserve(ids.size());
+      for (int64_t id : ids) {
+        if (!valid(id) || static_cast<size_t>(id) >= idChar.size() || idChar[id].empty()) continue;
+        out.emplace(idChar[id], static_cast<double>(row[id]) - lse);
+      }
+    }
+    return table;
+  }
+
+  std::vector<double> Score(const RescoreRequest& req) {
+    const size_t T = req.readings.size();
+    const size_t N = req.candidates.size();
+    if (T == 0) return {};
+    if (N == 0) return {};
+
+    std::vector<Ort::Value> outs;
+    size_t V = 0;
+    if (!Forward(req.readings, &outs, &V)) return {};
     const float* lg = outs[0].GetTensorData<float>();
 
     // Candidate char ids; -1 == not in vocab.
@@ -367,6 +434,17 @@ std::vector<double> SlothRescorer::score(const RescoreRequest& request) {
   if (!ready()) return {};
   try {
     return impl_->Score(request);
+  } catch (...) {
+    return {};
+  }
+}
+
+SlothRescorer::CharLogProbTable SlothRescorer::charLogProbs(
+    const std::vector<std::string>& readings,
+    const std::vector<std::vector<std::string>>* extraChars) {
+  if (!ready()) return {};
+  try {
+    return impl_->CharLogProbs(readings, extraChars);
   } catch (...) {
     return {};
   }

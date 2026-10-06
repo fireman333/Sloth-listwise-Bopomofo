@@ -11,6 +11,7 @@
 //                       [--w 0.5] [--sloth-threads 1] [--electra-threads 1]
 //                       [--electra-onnx model_int8.onnx]
 //                       [--parallel] [--latency 1,2,4]
+//                       [--walk-mode --alpha 1 [--sloth-onnx f] [--walk-reps n]]
 // Outputs (in out-dir): result_cpp_{A,D,B,DB,E,DE}<tag>.jsonl, cpp_nbest.jsonl
 //   --nbest   take candidates from an existing nbest jsonl (e.g. out/nbest_lex.jsonl)
 //             instead of walkNBest (no grid; A = nbest[0]); use with --tag.
@@ -18,6 +19,14 @@
 //   --latency "t1,t2,.." instead of the normal run: time D / E / D+E (sequential and
 //             parallel) on the 10-candidate sentences for each thread count; prints a
 //             JSON summary with the machine load average.
+//   --walk-mode  R-walk (neural_walk.h): one charLogProbs forward + walkWithCharBonus per
+//             sentence with --sloth-dir as the ranker export. Writes
+//             result_cpp_Rwalk_a<alpha><tag>.jsonl ({id, choice, latency_ms, forward_ms,
+//             walk_ms, n_syl, alpha0_same_as_walk}). --sloth-onnx picks onnx/<file>
+//             (model_quantized.onnx default; model.onnx = fp32). --walk-reps n > 0 instead
+//             times n repetitions of (a) the full sentence and (b) every keystroke prefix,
+//             p50/p95 overall and by buffer length (<=8, 9-16, >16), plus load average,
+//             into lat_cpp_rwalk_a<alpha><tag>.json.
 
 #include <algorithm>
 #include <chrono>
@@ -35,6 +44,7 @@
 #include "nlohmann/json.hpp"
 #include "rescorer.h"
 #ifdef RESCORER_BENCH_WITH_SLOTH
+#include "neural_walk.h"
 #include "sloth_rescorer.h"
 #endif
 #ifdef RESCORER_BENCH_WITH_QWEN
@@ -74,6 +84,175 @@ struct Item {
   std::vector<std::string> reading;
 };
 
+#ifdef RESCORER_BENCH_WITH_SLOTH
+static std::string Uptime() {
+  std::string out;
+  if (FILE* p = popen("uptime", "r")) {
+    char buf[512];
+    while (fgets(buf, sizeof buf, p)) out += buf;
+    pclose(p);
+  }
+  while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+  return out;
+}
+
+static std::string AlphaTag(double alpha) {
+  char b[32];
+  snprintf(b, sizeof b, "%g", alpha);
+  return b;
+}
+
+static int RunWalkMode(const std::vector<Item>& items, std::shared_ptr<McBopomofo::McBopomofoLM> lm,
+                       const std::string& slothDir, const std::string& onnxFile, int threads,
+                       double alpha, int reps, const std::string& outDir, const std::string& tag) {
+  McBopomofo::SlothRescorer::Options so;
+  so.intraOpThreads = threads;
+  so.onnxFile = onnxFile;
+  auto t0 = Clock::now();
+  McBopomofo::SlothRescorer model(slothDir, so);
+  fprintf(stderr, "R model %s/onnx/%s %s (%.0f ms)\n", slothDir.c_str(), onnxFile.c_str(),
+          model.ready() ? "ready" : "FAILED (falls back to plain walk)", MsSince(t0));
+  McBopomofo::NeuralWalkOptions opt;
+  opt.alpha = alpha;
+  auto makeGrid = [&](const std::vector<std::string>& rs, size_t n, bool* ok) {
+    auto g = std::make_unique<ReadingGrid>(lm);
+    *ok = true;
+    for (size_t i = 0; i < n; ++i) *ok = g->insertReading(rs[i]) && *ok;
+    return g;
+  };
+  auto join = [](const ReadingGrid::WalkResult& r) {
+    std::string s;
+    for (auto& n : r.nodes) s += n->value();
+    return s;
+  };
+  // Warm-up.
+  for (size_t i = 0; i < std::min<size_t>(10, items.size()); ++i) {
+    bool ok;
+    auto g = makeGrid(items[i].reading, items[i].reading.size(), &ok);
+    if (ok) McBopomofo::NeuralWalk(*g, &model, opt);
+  }
+
+  if (reps <= 0) {
+    std::ofstream f(outDir + "/result_cpp_Rwalk_a" + AlphaTag(alpha) + tag + ".jsonl", std::ios::binary);
+    size_t done = 0, skipped = 0, correct = 0, alpha0Same = 0, neuralUsed = 0;
+    for (const Item& it : items) {
+      bool ok;
+      auto g = makeGrid(it.reading, it.reading.size(), &ok);
+      if (!ok) {
+        fprintf(stderr, "WARN %s: unknown reading, skipped\n", it.id.c_str());
+        ++skipped;
+        continue;
+      }
+      McBopomofo::NeuralWalkStats st;
+      auto t = Clock::now();
+      std::string choice = join(McBopomofo::NeuralWalk(*g, &model, opt, &st));
+      double total = MsSince(t);
+      // Sanity: alpha = 0 with the same real table must equal the stock walk.
+      bool same0 = true;
+      if (model.ready()) {
+        auto extra = g->charsAtPositions();
+        ReadingGrid::PositionalCharScores sc;
+        sc.table = model.charLogProbs(g->readings(), &extra);
+        auto w0 = g->walkWithCharBonus(0.0, sc);
+        auto w = g->walk();
+        same0 = w0.nodes == w.nodes;
+      }
+      alpha0Same += same0;
+      neuralUsed += st.usedNeural;
+      correct += choice == it.text;
+      ++done;
+      f << json{{"id", it.id}, {"choice", choice}, {"latency_ms", Round3(total)},
+                {"forward_ms", Round3(st.forwardMs)}, {"walk_ms", Round3(st.walkMs)},
+                {"n_syl", it.reading.size()}, {"neural", st.usedNeural},
+                {"alpha0_same_as_walk", same0}}.dump() << "\n";
+    }
+    fprintf(stderr, "R-walk alpha=%g: %zu items, %zu skipped, acc %.1f%%, neural used %zu, alpha0==walk %zu/%zu\n",
+            alpha, done, skipped, done ? 100.0 * correct / done : 0.0, neuralUsed, alpha0Same, done);
+    return 0;
+  }
+
+  // ---- latency: full sentence and every keystroke prefix.
+  double la[3];
+  getloadavg(la, 3);
+  json out = json::object();
+  out["uptime_start"] = Uptime();
+  out["loadavg_start"] = {la[0], la[1], la[2]};
+  out["model"] = slothDir + "/onnx/" + onnxFile;
+  out["threads"] = threads;
+  out["alpha"] = alpha;
+  out["reps"] = reps;
+  out["n_sentences"] = items.size();
+  auto bucket = [](size_t n) { return n <= 8 ? "le8" : n <= 16 ? "9-16" : "gt16"; };
+  std::map<std::string, std::vector<double>> sent, sentFwd, sentWalk, key, keyFwd, keyWalk, stock, score1;
+  for (int rep = 0; rep < reps; ++rep) {
+    for (const Item& it : items) {
+      const size_t n = it.reading.size();
+      bool ok;
+      auto g = makeGrid(it.reading, n, &ok);
+      if (!ok) continue;
+      McBopomofo::NeuralWalkStats st;
+      auto t = Clock::now();
+      McBopomofo::NeuralWalk(*g, &model, opt, &st);
+      double ms = MsSince(t);
+      for (const std::string b : {std::string("all"), std::string(bucket(n))}) {
+        sent[b].push_back(ms);
+        sentFwd[b].push_back(st.forwardMs);
+        sentWalk[b].push_back(st.walkMs);
+      }
+      t = Clock::now();
+      g->walk();
+      double ws = MsSince(t);
+      for (const std::string b : {std::string("all"), std::string(bucket(n))}) stock[b].push_back(ws);
+      // Reference: plain score() of one candidate (same forward, no table).
+      McBopomofo::RescoreRequest rq;
+      rq.readings = it.reading;
+      rq.candidates = {it.text};
+      t = Clock::now();
+      model.score(rq);
+      double s1 = MsSince(t);
+      for (const std::string b : {std::string("all"), std::string(bucket(n))}) score1[b].push_back(s1);
+      // Keystroke simulation: grid grows one reading at a time; each key =
+      // forward over the whole buffer + walk (grid update itself excluded).
+      ReadingGrid kg(lm);
+      for (size_t i = 0; i < n; ++i) {
+        if (!kg.insertReading(it.reading[i])) break;
+        McBopomofo::NeuralWalkStats ks;
+        auto tk = Clock::now();
+        McBopomofo::NeuralWalk(kg, &model, opt, &ks);
+        double kms = MsSince(tk);
+        for (const std::string b : {std::string("all"), std::string(bucket(i + 1))}) {
+          key[b].push_back(kms);
+          keyFwd[b].push_back(ks.forwardMs);
+          keyWalk[b].push_back(ks.walkMs);
+        }
+      }
+    }
+  }
+  auto summarize = [](std::map<std::string, std::vector<double>>& m) {
+    json j = json::object();
+    for (auto& [b, v] : m) {
+      j[b] = {{"n", v.size()}, {"p50", Round3(Pct(v, .5))}, {"p95", Round3(Pct(v, .95))},
+              {"max", Round3(Pct(v, 1.0))}};
+    }
+    return j;
+  };
+  out["sentence_total_ms"] = summarize(sent);
+  out["sentence_forward_ms"] = summarize(sentFwd);
+  out["sentence_walk_ms"] = summarize(sentWalk);
+  out["sentence_stock_walk_ms"] = summarize(stock);
+  out["sentence_score1cand_ms"] = summarize(score1);
+  out["keystroke_total_ms"] = summarize(key);
+  out["keystroke_forward_ms"] = summarize(keyFwd);
+  out["keystroke_walk_ms"] = summarize(keyWalk);
+  getloadavg(la, 3);
+  out["loadavg_end"] = {la[0], la[1], la[2]};
+  out["uptime_end"] = Uptime();
+  std::ofstream(outDir + "/lat_cpp_rwalk_a" + AlphaTag(alpha) + tag + ".json") << out.dump(1) << "\n";
+  printf("%s\n", out.dump(1).c_str());
+  return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
   std::string root = BENCH_ROOT;  // "<repo>/" (AFM Input directory)
   std::string testset = root + "bench/data/testset.jsonl";
@@ -86,6 +265,10 @@ int main(int argc, char** argv) {
   bool skipSloth = false, skipQwen = false, parallel = false;
   std::string electraOnnx = "model_int8.onnx";
   std::string electraDir, nbestFile, tag, latencyList;
+  std::string slothOnnx = "model_quantized.onnx";
+  bool walkMode = false;
+  double alpha = 1.0;
+  int walkReps = 0;
   double wD = 0.5;
   int slothThreads = 1, electraThreads = 1;
   for (int i = 1; i < argc; ++i) {
@@ -115,6 +298,10 @@ int main(int argc, char** argv) {
     else if (a == "--electra-threads") electraThreads = std::stoi(next());
     else if (a == "--parallel") parallel = true;
     else if (a == "--latency") latencyList = next();
+    else if (a == "--walk-mode") walkMode = true;
+    else if (a == "--alpha") alpha = std::stod(next());
+    else if (a == "--sloth-onnx") slothOnnx = next();
+    else if (a == "--walk-reps") walkReps = std::stoi(next());
     else {
       fprintf(stderr, "unknown arg %s\n", a.c_str());
       return 2;
@@ -149,6 +336,16 @@ int main(int argc, char** argv) {
     return 1;
   }
   fprintf(stderr, "LM loaded in %.0f ms\n", MsSince(t0));
+
+  // ---- R-walk mode
+  if (walkMode) {
+#ifdef RESCORER_BENCH_WITH_SLOTH
+    return RunWalkMode(items, lm, slothDir, slothOnnx, slothThreads, alpha, walkReps, outDir, tag);
+#else
+    fprintf(stderr, "walk mode needs the Sloth backend\n");
+    return 2;
+#endif
+  }
 
   // ---- rescorers
   std::unique_ptr<McBopomofo::Rescorer> sloth, qwen;

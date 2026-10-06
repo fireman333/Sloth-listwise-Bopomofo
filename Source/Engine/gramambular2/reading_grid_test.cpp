@@ -1058,4 +1058,129 @@ TEST(ReadingGridTest, WalkNBestRespectsOverride) {
   EXPECT_EQ(nbest[0].nodes[0], grid.walk().nodes[0]);
 }
 
+// ---------------------------------------------------------------------------
+// walkWithCharBonus()
+
+static ReadingGrid::PositionalCharScores EmptyScores(size_t n) {
+  ReadingGrid::PositionalCharScores s;
+  s.table.resize(n);
+  return s;
+}
+
+static void ExpectSameWalk(const ReadingGrid::WalkResult& a,
+                           const ReadingGrid::WalkResult& b) {
+  ASSERT_EQ(a.nodes.size(), b.nodes.size());
+  for (size_t i = 0; i < a.nodes.size(); ++i) {
+    EXPECT_EQ(a.nodes[i], b.nodes[i]);  // same grid node, not a copy
+    EXPECT_EQ(a.nodes[i]->value(), b.nodes[i]->value());
+  }
+  EXPECT_EQ(a.totalReadings, b.totalReadings);
+  EXPECT_EQ(a.valuesAsStrings(), b.valuesAsStrings());
+}
+
+TEST(ReadingGridTest, CharBonusAlphaZeroEqualsWalk) {
+  ReadingGrid grid = MakeNBestGrid();
+  // A table that would change the result if alpha were not zero.
+  auto scores = EmptyScores(grid.length());
+  scores.table[7]["鍾"] = 0;
+  scores.table[0]["膏"] = 0;
+  ExpectSameWalk(grid.walkWithCharBonus(0.0, scores), grid.walk());
+  ExpectSameWalk(grid.walkWithCharBonus(0.0, EmptyScores(grid.length())),
+                 grid.walk());
+  // Every prefix length, and with an override in place.
+  ReadingGrid g2(std::make_shared<SimpleLM>(kSampleData));
+  g2.setReadingSeparator("");
+  for (const char* r : {"ㄍㄠ", "ㄎㄜ", "ㄐㄧˋ", "ㄍㄨㄥ", "ㄙ", "ㄉㄜ˙",
+                        "ㄋㄧㄢˊ", "ㄓㄨㄥ", "ㄐㄧㄤˇ", "ㄐㄧㄣ"}) {
+    g2.insertReading(r);
+    ExpectSameWalk(g2.walkWithCharBonus(0.0, EmptyScores(g2.length())),
+                   g2.walk());
+  }
+  ASSERT_TRUE(g2.overrideCandidate(7, "年終"));
+  ExpectSameWalk(g2.walkWithCharBonus(0.0, EmptyScores(g2.length())),
+                 g2.walk());
+}
+
+TEST(ReadingGridTest, CharBonusChangesPick) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  grid.insertReading("ㄙ");
+  ASSERT_EQ(grid.walk().valuesAsStrings(), std::vector<std::string>{"斯"});
+  auto scores = EmptyScores(1);
+  scores.table[0] = {{"斯", -5.0}, {"思", -0.1}};
+  // 思: -9.006 + 1*(-0.1) > 斯: -8.092 + 1*(-5) ; others get missing -30.
+  auto r = grid.walkWithCharBonus(1.0, scores);
+  ASSERT_EQ(r.valuesAsStrings(), std::vector<std::string>{"思"});
+  // The path holds a copy; the grid node itself is untouched.
+  EXPECT_NE(r.nodes[0], grid.walk().nodes[0]);
+  EXPECT_EQ(grid.walk().valuesAsStrings(), std::vector<std::string>{"斯"});
+  EXPECT_NEAR(r.score, -9.006414 - 0.1, 1e-9);
+  // Picked value can be applied as an override and then walks the same.
+  ASSERT_TRUE(grid.overrideCandidate(0, r.nodes[0]->value()));
+  EXPECT_EQ(grid.walk().valuesAsStrings(), std::vector<std::string>{"思"});
+}
+
+TEST(ReadingGridTest, CharBonusCanChangeSegmentation) {
+  ReadingGrid grid = MakeNBestGrid();
+  // Stock: 高科技 公司 的 年中 獎金. Favour 終 at position 7 strongly.
+  auto scores = EmptyScores(grid.length());
+  const auto chars = grid.charsAtPositions();
+  for (size_t t = 0; t < grid.length(); ++t) {
+    for (const auto& c : chars[t]) scores.table[t][c] = -1.0;
+  }
+  scores.table[7]["終"] = 0.0;
+  scores.table[7]["中"] = -20.0;
+  auto r = grid.walkWithCharBonus(1.0, scores);
+  std::string joined;
+  for (const auto& v : r.valuesAsStrings()) joined += v;
+  EXPECT_EQ(joined.find("年中"), std::string::npos) << joined;
+  EXPECT_NE(joined.find("終"), std::string::npos) << joined;
+  EXPECT_EQ(r.totalReadings, grid.length());
+}
+
+TEST(ReadingGridTest, CharBonusSkipsOverriddenNodes) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  grid.insertReading("ㄙ");
+  ASSERT_TRUE(grid.overrideCandidate(0, "司"));
+  auto scores = EmptyScores(1);
+  scores.table[0] = {{"思", 0.0}};  // 司 is missing -> would get -30
+  auto r = grid.walkWithCharBonus(5.0, scores);
+  ASSERT_EQ(r.valuesAsStrings(), std::vector<std::string>{"司"});
+  EXPECT_EQ(r.nodes[0], grid.walk().nodes[0]);
+  EXPECT_DOUBLE_EQ(r.score, ReadingGrid::Node::kOverridingScore);
+
+  // Soft override (score from top unigram) is also left alone.
+  ReadingGrid g2(std::make_shared<SimpleLM>(kSampleData));
+  g2.setReadingSeparator("");
+  g2.insertReading("ㄙ");
+  ASSERT_TRUE(g2.overrideCandidate(
+      0, "司",
+      ReadingGrid::Node::OverrideType::kOverrideValueWithScoreFromTopUnigram));
+  r = g2.walkWithCharBonus(5.0, scores);
+  ASSERT_EQ(r.valuesAsStrings(), std::vector<std::string>{"司"});
+}
+
+TEST(ReadingGridTest, CharBonusTableSizeMismatchFallsBackToWalk) {
+  ReadingGrid grid = MakeNBestGrid();
+  auto scores = EmptyScores(3);
+  ExpectSameWalk(grid.walkWithCharBonus(1.0, scores), grid.walk());
+  ReadingGrid empty(std::make_shared<SimpleLM>(kSampleData));
+  EXPECT_TRUE(empty.walkWithCharBonus(1.0, EmptyScores(0)).nodes.empty());
+}
+
+TEST(ReadingGridTest, CharsAtPositions) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  grid.insertReading("ㄋㄧㄢˊ");
+  grid.insertReading("ㄓㄨㄥ");
+  auto chars = grid.charsAtPositions();
+  ASSERT_EQ(chars.size(), 2u);
+  std::set<std::string> p1(chars[1].begin(), chars[1].end());
+  EXPECT_TRUE(p1.count("中"));
+  EXPECT_TRUE(p1.count("終"));  // from 年終
+  EXPECT_TRUE(p1.count("鍾"));
+  EXPECT_EQ(p1.size(), chars[1].size());  // distinct
+}
+
 }  // namespace Formosa::Gramambular2

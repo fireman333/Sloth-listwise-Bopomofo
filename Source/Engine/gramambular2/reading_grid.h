@@ -31,6 +31,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -228,6 +229,30 @@ class ReadingGrid {
   // Overridden nodes keep their override as the only option. Returns empty for
   // an empty grid or k == 0.
   std::vector<WalkResult> walkNBest(size_t k);
+
+  // Per-position character scores for walkWithCharBonus(). table[t] maps a
+  // single UTF-8 character to a score (e.g. a neural log-probability of that
+  // character at reading position t). Characters absent from table[t] score
+  // missingScore.
+  struct PositionalCharScores {
+    std::vector<std::unordered_map<std::string, double>> table;
+    double missingScore = -30.0;
+  };
+
+  // Like walk(), but every unigram of every node competes with
+  //   unigram score + alpha * sum_j scores(position + j, j-th char of value)
+  // and the node contributes its best such unigram. Overridden nodes (user
+  // picks) keep their stock score and value and receive no bonus. With
+  // alpha == 0 the result equals walk(). If scores.table.size() != length(),
+  // falls back to walk(). A path node whose chosen unigram differs from the
+  // grid node's current one is a copy pointing at the chosen unigram (as in
+  // walkNBest()). result.score is the bonus-inclusive path score.
+  WalkResult walkWithCharBonus(double alpha,
+                               const PositionalCharScores& scores);
+
+  // For each reading position, the distinct single characters (UTF-8) that
+  // any unigram of any node covering that position places there.
+  [[nodiscard]] std::vector<std::vector<std::string>> charsAtPositions() const;
 
   struct Candidate {
     Candidate(std::string r, std::string v, std::string rv = "")
