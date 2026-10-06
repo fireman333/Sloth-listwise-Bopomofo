@@ -168,6 +168,37 @@ if (RESCORER_QWEN)
 endif ()
 
 # ---------------------------------------------------------------------------
+# PreciseWalk (precise mode): R-walk N-best + calibrated gate + R/Qwen fusion.
+# ---------------------------------------------------------------------------
+if (RESCORER_SLOTH)
+    set(_pw_engine_dir "${CMAKE_CURRENT_LIST_DIR}/..")
+    if (NOT TARGET gramambular2_lib)
+        set(_saved_enable_test "${ENABLE_TEST}")
+        set(ENABLE_TEST OFF)
+        add_subdirectory("${_pw_engine_dir}" "${CMAKE_CURRENT_BINARY_DIR}/engine" EXCLUDE_FROM_ALL)
+        set(ENABLE_TEST "${_saved_enable_test}")
+    endif ()
+    add_library(precise_walk STATIC precise_walk.h precise_walk.cpp rescorer.h)
+    target_include_directories(precise_walk PUBLIC "${CMAKE_CURRENT_LIST_DIR}" "${_pw_engine_dir}"
+        "${_pw_engine_dir}/gramambular2")
+    target_link_libraries(precise_walk PUBLIC sloth_rescorer gramambular2_lib)
+    target_compile_features(precise_walk PUBLIC cxx_std_17)
+    if (ENABLE_TEST)
+        add_executable(precise_walk_test precise_walk_test.cpp)
+        target_link_libraries(precise_walk_test precise_walk McBopomofoLMLib GTest::gtest_main)
+        target_compile_definitions(precise_walk_test PRIVATE
+            RWALK_MODEL_DIR="${CMAKE_CURRENT_LIST_DIR}/../../../../train/ranker/export/clean_v1"
+            PRECISE_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/precise_fixture.jsonl"
+            DATA_TXT="${_pw_engine_dir}/../Data/data.txt")
+        target_include_directories(precise_walk_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/llama.cpp/vendor")
+        set_target_properties(precise_walk_test PROPERTIES
+            BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+        include(GoogleTest)
+        gtest_discover_tests(precise_walk_test DISCOVERY_MODE PRE_TEST)
+    endif ()
+endif ()
+
+# ---------------------------------------------------------------------------
 # rescorer_bench: end-to-end C++ parity benchmark CLI (needs both backends)
 #   cmake -S Source/Engine/Rescorer -B build-bench -DENABLE_TEST=OFF
 #   cmake --build build-bench --target rescorer_bench
@@ -195,7 +226,7 @@ if (RESCORER_BENCH AND (RESCORER_SLOTH OR RESCORER_QWEN))
     get_filename_component(_bench_root "${CMAKE_CURRENT_LIST_DIR}/../../../.." REALPATH)
     target_compile_definitions(rescorer_bench PRIVATE BENCH_ROOT="${_bench_root}/")
     if (RESCORER_SLOTH)
-        target_link_libraries(rescorer_bench PRIVATE sloth_rescorer)
+        target_link_libraries(rescorer_bench PRIVATE sloth_rescorer precise_walk)
         target_compile_definitions(rescorer_bench PRIVATE RESCORER_BENCH_WITH_SLOTH)
         set_target_properties(rescorer_bench PROPERTIES
             BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")

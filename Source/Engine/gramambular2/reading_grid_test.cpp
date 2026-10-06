@@ -1183,4 +1183,92 @@ TEST(ReadingGridTest, CharsAtPositions) {
   EXPECT_EQ(p1.size(), chars[1].size());  // distinct
 }
 
+// ---------------------------------------------------------------------------
+// walkNBestWithCharBonus()
+
+static std::string Joined(const ReadingGrid::WalkResult& r) {
+  std::string j;
+  for (const auto& v : r.valuesAsStrings()) j += v;
+  return j;
+}
+
+TEST(ReadingGridTest, NBestCharBonusAlphaZeroEqualsNBest) {
+  ReadingGrid grid = MakeNBestGrid();
+  auto scores = EmptyScores(grid.length());
+  scores.table[7]["終"] = 0;
+  auto a = grid.walkNBestWithCharBonus(10, 0.0, scores);
+  auto b = grid.walkNBest(10);
+  ASSERT_EQ(a.size(), b.size());
+  for (size_t i = 0; i < a.size(); ++i) {
+    EXPECT_EQ(Joined(a[i]), Joined(b[i]));
+    EXPECT_DOUBLE_EQ(a[i].score, b[i].score);
+  }
+  // Size mismatch falls back to walkNBest.
+  auto c = grid.walkNBestWithCharBonus(10, 1.0, EmptyScores(2));
+  ASSERT_EQ(c.size(), b.size());
+  EXPECT_EQ(Joined(c[0]), Joined(b[0]));
+}
+
+TEST(ReadingGridTest, NBestCharBonusTopEqualsCharBonusWalk) {
+  ReadingGrid grid = MakeNBestGrid();
+  auto scores = EmptyScores(grid.length());
+  const auto chars = grid.charsAtPositions();
+  for (size_t t = 0; t < grid.length(); ++t) {
+    double v = -1.0;
+    for (const auto& c : chars[t]) {
+      scores.table[t][c] = v;
+      v -= 0.37;
+    }
+  }
+  scores.table[7]["終"] = 0.0;
+  for (double alpha : {0.25, 0.5, 1.0, 3.0}) {
+    auto best = grid.walkWithCharBonus(alpha, scores);
+    auto nb = grid.walkNBestWithCharBonus(8, alpha, scores);
+    ASSERT_FALSE(nb.empty());
+    EXPECT_EQ(Joined(nb[0]), Joined(best)) << alpha;
+    EXPECT_NEAR(nb[0].score, best.score, 1e-9) << alpha;
+    std::set<std::string> distinct;
+    for (size_t i = 0; i < nb.size(); ++i) {
+      distinct.insert(Joined(nb[i]));
+      EXPECT_EQ(nb[i].totalReadings, grid.length());
+      if (i > 0) {
+        EXPECT_LE(nb[i].score, nb[i - 1].score);
+      }
+      // score = sum over path nodes of unigram score + alpha * char bonus.
+      double expect = 0;
+      size_t pos = 0;
+      for (const auto& n : nb[i].nodes) {
+        expect += n->score();
+        std::vector<std::string> cs;
+        const std::string v = n->value();
+        for (size_t b = 0; b < v.size();) {
+          unsigned char ch = static_cast<unsigned char>(v[b]);
+          size_t len = ch < 0x80 ? 1 : (ch >> 5) == 6 ? 2 : (ch >> 4) == 14 ? 3 : 4;
+          const std::string c = v.substr(b, len);
+          auto it = scores.table[pos].find(c);
+          expect += alpha * (it == scores.table[pos].end() ? scores.missingScore
+                                                            : it->second);
+          b += len;
+          ++pos;
+        }
+      }
+      EXPECT_NEAR(nb[i].score, expect, 1e-6) << Joined(nb[i]);
+    }
+    EXPECT_EQ(distinct.size(), nb.size());
+  }
+}
+
+TEST(ReadingGridTest, NBestCharBonusKeepsOverride) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  grid.insertReading("ㄙ");
+  ASSERT_TRUE(grid.overrideCandidate(0, "司"));
+  auto scores = EmptyScores(1);
+  scores.table[0] = {{"思", 0.0}};
+  auto nb = grid.walkNBestWithCharBonus(5, 5.0, scores);
+  ASSERT_EQ(nb.size(), 1u);
+  EXPECT_EQ(Joined(nb[0]), "司");
+  EXPECT_DOUBLE_EQ(nb[0].score, ReadingGrid::Node::kOverridingScore);
+}
+
 }  // namespace Formosa::Gramambular2

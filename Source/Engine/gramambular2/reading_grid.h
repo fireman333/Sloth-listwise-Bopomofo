@@ -250,6 +250,15 @@ class ReadingGrid {
   WalkResult walkWithCharBonus(double alpha,
                                const PositionalCharScores& scores);
 
+  // walkNBest() under the walkWithCharBonus() edge score: every unigram u of
+  // a non-overridden node scores u.score + alpha * sum_j scores(pos + j, j-th
+  // char of u). result.score is the bonus-inclusive path score; results[0]
+  // has the same values as walkWithCharBonus(alpha, scores) (up to ties).
+  // alpha == 0 equals walkNBest(k); scores.table.size() != length() falls
+  // back to walkNBest(k).
+  std::vector<WalkResult> walkNBestWithCharBonus(
+      size_t k, double alpha, const PositionalCharScores& scores);
+
   // For each reading position, the distinct single characters (UTF-8) that
   // any unigram of any node covering that position places there.
   [[nodiscard]] std::vector<std::vector<std::string>> charsAtPositions() const;
@@ -317,6 +326,9 @@ class ReadingGrid {
   }
 
  protected:
+  std::vector<WalkResult> walkNBestImpl(size_t k, double alpha,
+                                        const PositionalCharScores* scores);
+
   size_t cursor_ = 0;
   std::string separator_ = kDefaultSeparator;
   std::vector<std::string> readings_;

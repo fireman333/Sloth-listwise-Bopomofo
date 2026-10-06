@@ -208,7 +208,24 @@ ReadingGrid::WalkResult ReadingGrid::walk() {
   return result;
 }
 
+namespace {
+void SplitCodePoints(const std::string& s, std::vector<std::string>* out);
+}  // namespace
+
 std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBest(size_t k) {
+  return walkNBestImpl(k, 0.0, nullptr);
+}
+
+std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBestWithCharBonus(
+    size_t k, double alpha, const PositionalCharScores& scores) {
+  if (scores.table.size() != readings_.size()) {
+    return walkNBest(k);
+  }
+  return walkNBestImpl(k, alpha, &scores);
+}
+
+std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBestImpl(
+    size_t k, double alpha, const PositionalCharScores* scores) {
   std::vector<WalkResult> results;
   if (spans_.empty() || k == 0) {
     return results;
@@ -233,6 +250,8 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBest(size_t k) {
   uint64_t seq = 0;
   size_t reachableStates = 0;
   size_t evaluatedEdges = 0;
+  std::vector<double> optionAdds;
+  std::vector<std::string> chars;
 
   for (size_t i = 0; i < readingLen; ++i) {
     if (table[i].empty()) {
@@ -280,13 +299,39 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBest(size_t k) {
         optionEnd = optionBegin + 1;
       }
 
+      // Per-option edge score, computed once per node: the unigram score,
+      // plus alpha * sum of positional char scores when a bonus table is
+      // given (same rule as walkWithCharBonus(); overridden/empty nodes keep
+      // their stock score).
+      optionAdds.clear();
+      for (size_t u = optionBegin; u < optionEnd; ++u) {
+        double add = (node->isOverridden() || unigrams.empty())
+                         ? node->score()
+                         : unigrams[u].score();
+        if (scores != nullptr && alpha != 0 && !node->isOverridden() &&
+            !unigrams.empty()) {
+          double bonus = 0;
+          SplitCodePoints(unigrams[u].value(), &chars);
+          for (size_t j = 0; j < chars.size(); ++j) {
+            const size_t pos = i + j;
+            if (pos >= readingLen) {
+              bonus += scores->missingScore;
+              continue;
+            }
+            const auto& m = scores->table[pos];
+            auto it = m.find(chars[j]);
+            bonus += it == m.end() ? scores->missingScore : it->second;
+          }
+          add += alpha * bonus;
+        }
+        optionAdds.push_back(add);
+      }
+
       std::vector<Entry>& target = table[i + spanLen];
       for (size_t idx : order) {
         for (size_t u = optionBegin; u < optionEnd; ++u) {
           std::string value = unigrams.empty() ? "" : unigrams[u].value();
-          double add = (node->isOverridden() || unigrams.empty())
-                           ? node->score()
-                           : unigrams[u].score();
+          double add = optionAdds[u - optionBegin];
           std::string text = entries[idx].text + value;
           double score = entries[idx].score + add;
           auto it =

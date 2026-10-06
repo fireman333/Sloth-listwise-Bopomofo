@@ -27,6 +27,17 @@
 //             times n repetitions of (a) the full sentence and (b) every keystroke prefix,
 //             p50/p95 overall and by buffer length (<=8, 9-16, >16), plus load average,
 //             into lat_cpp_rwalk_a<alpha><tag>.json.
+//   --precise-mode  precise mode (precise_walk.h): R-walk N-best (--k, --alpha) + calibrated
+//             gate + R/Qwen fusion, with --sloth-dir as the R export and --qwen as the heavy
+//             model. --precise-config f loads PreciseConfig (key = value); without it the
+//             defaults + --k/--alpha are used. --precise-dump forces tau = 1 (Qwen on every
+//             sentence) so all candidate scores are logged for offline fitting
+//             (bench/src/precise_calib.py). Writes result_cpp_precise<tag>.jsonl ({id, n_syl,
+//             cands, r_scores, q_scores, p_top1, gate, heavy_called, heavy_ok, chosen, choice,
+//             rwalk_choice, top_eq_rwalk, forward_ms, nbest_ms, qwen_ms, total_ms}).
+//             --precise-reps n > 0 instead times n repetitions: R-walk, precise without the heavy
+//             model (per sentence and per keystroke prefix), and the full precise decision per
+//             sentence split by gate open / closed, into lat_cpp_precise<tag>.json.
 
 #include <algorithm>
 #include <chrono>
@@ -49,6 +60,9 @@
 #endif
 #ifdef RESCORER_BENCH_WITH_QWEN
 #include "qwen_rescorer.h"
+#endif
+#if defined(RESCORER_BENCH_WITH_SLOTH)
+#include "precise_walk.h"
 #endif
 #ifdef RESCORER_BENCH_WITH_ELECTRA
 #include "electra_rescorer.h"
@@ -253,6 +267,171 @@ static int RunWalkMode(const std::vector<Item>& items, std::shared_ptr<McBopomof
 }
 #endif
 
+#ifdef RESCORER_BENCH_WITH_SLOTH
+static int RunPreciseMode(const std::vector<Item>& items, std::shared_ptr<McBopomofo::McBopomofoLM> lm,
+                          const std::string& slothDir, const std::string& onnxFile, int threads,
+                          const std::string& qwenPath, bool skipQwen,
+                          const McBopomofo::PreciseConfig& cfg, bool dump, int reps,
+                          const std::string& outDir, const std::string& tag) {
+  McBopomofo::SlothRescorer::Options so;
+  so.intraOpThreads = threads;
+  so.onnxFile = onnxFile;
+  auto t0 = Clock::now();
+  McBopomofo::SlothRescorer model(slothDir, so);
+  fprintf(stderr, "R model %s/onnx/%s %s (%.0f ms)\n", slothDir.c_str(), onnxFile.c_str(),
+          model.ready() ? "ready" : "FAILED", MsSince(t0));
+  std::unique_ptr<McBopomofo::Rescorer> heavy;
+#ifdef RESCORER_BENCH_WITH_QWEN
+  if (!skipQwen) {
+    t0 = Clock::now();
+    heavy = std::make_unique<McBopomofo::QwenRescorer>(qwenPath);
+    fprintf(stderr, "Qwen %s (%.0f ms)\n", heavy->ready() ? "ready" : "FAILED", MsSince(t0));
+  }
+#else
+  (void)qwenPath;
+  (void)skipQwen;
+#endif
+  McBopomofo::PreciseConfig c = cfg;
+  if (dump) c.tau = 1.0;
+  fprintf(stderr, "precise config: alpha=%g k=%zu tau=%g r_weight=%g beta=%g buckets=%zu timeout=%g\n",
+          c.alpha, c.k, c.tau, c.rWeight, c.beta, c.bucketUpper.size(), c.qwenTimeoutMs);
+  McBopomofo::NeuralWalkOptions wopt;
+  wopt.alpha = c.alpha;
+  auto join = [](const ReadingGrid::WalkResult& r) {
+    std::string s;
+    for (auto& n : r.nodes) s += n->value();
+    return s;
+  };
+  auto makeGrid = [&](const std::vector<std::string>& rs, size_t n, bool* ok) {
+    auto g = std::make_unique<ReadingGrid>(lm);
+    *ok = true;
+    for (size_t i = 0; i < n; ++i) *ok = g->insertReading(rs[i]) && *ok;
+    return g;
+  };
+  // Warm-up (R and heavy).
+  for (size_t i = 0; i < std::min<size_t>(10, items.size()); ++i) {
+    bool ok;
+    auto g = makeGrid(items[i].reading, items[i].reading.size(), &ok);
+    if (ok) McBopomofo::PreciseWalk(*g, &model, heavy.get(), c);
+  }
+
+  if (reps <= 0) {
+    std::ofstream f(outDir + "/result_cpp_precise" + tag + ".jsonl", std::ios::binary);
+    size_t done = 0, skipped = 0, correct = 0, rcorrect = 0, called = 0, okN = 0, topEq = 0;
+    for (const Item& it : items) {
+      bool ok;
+      auto g = makeGrid(it.reading, it.reading.size(), &ok);
+      if (!ok) {
+        fprintf(stderr, "WARN %s: unknown reading, skipped\n", it.id.c_str());
+        ++skipped;
+        continue;
+      }
+      auto r = McBopomofo::PreciseWalk(*g, &model, heavy.get(), c);
+      std::string choice = join(r.walk);
+      // Cross-check: candidate 0 must be the R-walk (walkWithCharBonus) pick.
+      std::string rw = join(McBopomofo::NeuralWalk(*g, &model, wopt));
+      bool eq = !r.candidates.empty() && r.candidates[0] == rw;
+      topEq += eq;
+      correct += choice == it.text;
+      rcorrect += rw == it.text;
+      called += r.decision.heavyCalled;
+      okN += r.decision.heavyOk;
+      ++done;
+      json row{{"id", it.id}, {"n_syl", it.reading.size()}, {"cands", r.candidates},
+               {"r_scores", r.rScores}, {"q_scores", r.decision.heavyScores},
+               {"p_top1", r.decision.pTop1}, {"gate", r.decision.gateOpen},
+               {"heavy_called", r.decision.heavyCalled}, {"heavy_ok", r.decision.heavyOk},
+               {"chosen", r.decision.chosen}, {"choice", choice}, {"rwalk_choice", rw},
+               {"top_eq_rwalk", eq}, {"neural", r.usedNeural},
+               {"forward_ms", Round3(r.forwardMs)}, {"nbest_ms", Round3(r.nbestMs)},
+               {"qwen_ms", Round3(r.decision.heavyMs)}, {"total_ms", Round3(r.totalMs)}};
+      f << row.dump() << "\n";
+      if (done % 200 == 0) fprintf(stderr, "  precise %zu/%zu\n", done, items.size());
+    }
+    fprintf(stderr,
+            "precise%s: %zu items, %zu skipped, acc %.1f%% (R-walk %.1f%%), heavy called %zu ok %zu, "
+            "cand0==R-walk %zu/%zu\n",
+            tag.c_str(), done, skipped, done ? 100.0 * correct / done : 0.0,
+            done ? 100.0 * rcorrect / done : 0.0, called, okN, topEq, done);
+    return 0;
+  }
+
+  // ---- latency
+  double la[3];
+  getloadavg(la, 3);
+  json out = json::object();
+  out["uptime_start"] = Uptime();
+  out["loadavg_start"] = {la[0], la[1], la[2]};
+  out["model"] = slothDir + "/onnx/" + onnxFile;
+  out["config"] = {{"alpha", c.alpha}, {"k", c.k}, {"tau", c.tau}, {"beta", c.beta},
+                   {"r_weight", c.rWeight}, {"bucket_upper", c.bucketUpper},
+                   {"temperatures", c.temperatures}};
+  out["threads"] = threads;
+  out["reps"] = reps;
+  out["n_sentences"] = items.size();
+  std::vector<double> sRwalk, sPreciseNoHeavy, sGateOpen, sGateClosed, sAll, sHeavy, kRwalk, kPrecise;
+  size_t nOpen = 0, nSent = 0;
+  for (int rep = 0; rep < reps; ++rep) {
+    for (const Item& it : items) {
+      const size_t n = it.reading.size();
+      bool ok;
+      auto g = makeGrid(it.reading, n, &ok);
+      if (!ok) continue;
+      auto t = Clock::now();
+      McBopomofo::NeuralWalk(*g, &model, wopt);
+      sRwalk.push_back(MsSince(t));
+      t = Clock::now();
+      McBopomofo::PreciseWalk(*g, &model, nullptr, c);
+      sPreciseNoHeavy.push_back(MsSince(t));
+      t = Clock::now();
+      auto r = McBopomofo::PreciseWalk(*g, &model, heavy.get(), c);
+      double full = MsSince(t);
+      sAll.push_back(full);
+      ++nSent;
+      if (r.decision.heavyCalled) {
+        ++nOpen;
+        sGateOpen.push_back(full);
+        sHeavy.push_back(r.decision.heavyMs);
+      } else {
+        sGateClosed.push_back(full);
+      }
+      // Keystrokes: R-walk vs precise N-best part (heavy model runs in the
+      // background on the composing buffer, not per key).
+      ReadingGrid kg(lm);
+      for (size_t i = 0; i < n; ++i) {
+        if (!kg.insertReading(it.reading[i])) break;
+        auto tk = Clock::now();
+        McBopomofo::NeuralWalk(kg, &model, wopt);
+        kRwalk.push_back(MsSince(tk));
+        tk = Clock::now();
+        McBopomofo::PreciseWalk(kg, &model, nullptr, c);
+        kPrecise.push_back(MsSince(tk));
+      }
+    }
+  }
+  auto sum = [](const std::vector<double>& v) {
+    double m = v.empty() ? 0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+    return json{{"n", v.size()}, {"p50", Round3(Pct(v, .5))}, {"p95", Round3(Pct(v, .95))},
+                {"mean", Round3(m)}, {"max", Round3(Pct(v, 1.0))}};
+  };
+  out["sentence_rwalk_ms"] = sum(sRwalk);
+  out["sentence_precise_no_heavy_ms"] = sum(sPreciseNoHeavy);
+  out["sentence_precise_gate_open_ms"] = sum(sGateOpen);
+  out["sentence_precise_gate_closed_ms"] = sum(sGateClosed);
+  out["sentence_precise_all_ms"] = sum(sAll);
+  out["sentence_heavy_call_ms"] = sum(sHeavy);
+  out["gate_open_rate"] = nSent ? double(nOpen) / nSent : 0.0;
+  out["keystroke_rwalk_ms"] = sum(kRwalk);
+  out["keystroke_precise_no_heavy_ms"] = sum(kPrecise);
+  getloadavg(la, 3);
+  out["loadavg_end"] = {la[0], la[1], la[2]};
+  out["uptime_end"] = Uptime();
+  std::ofstream(outDir + "/lat_cpp_precise" + tag + ".json") << out.dump(1) << "\n";
+  printf("%s\n", out.dump(1).c_str());
+  return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
   std::string root = BENCH_ROOT;  // "<repo>/" (AFM Input directory)
   std::string testset = root + "bench/data/testset.jsonl";
@@ -269,6 +448,10 @@ int main(int argc, char** argv) {
   bool walkMode = false;
   double alpha = 1.0;
   int walkReps = 0;
+  bool preciseMode = false, preciseDump = false;
+  std::string preciseConfig;
+  int preciseReps = 0;
+  bool kSet = false, alphaSet = false;
   double wD = 0.5;
   int slothThreads = 1, electraThreads = 1;
   for (int i = 1; i < argc; ++i) {
@@ -285,7 +468,7 @@ int main(int argc, char** argv) {
     else if (a == "--out-dir") outDir = next();
     else if (a == "--sloth-dir") slothDir = next();
     else if (a == "--qwen") qwenPath = next();
-    else if (a == "--k") k = std::stoul(next());
+    else if (a == "--k") { k = std::stoul(next()); kSet = true; }
     else if (a == "--limit") limit = std::stoul(next());
     else if (a == "--skip-sloth") skipSloth = true;
     else if (a == "--skip-qwen") skipQwen = true;
@@ -299,7 +482,11 @@ int main(int argc, char** argv) {
     else if (a == "--parallel") parallel = true;
     else if (a == "--latency") latencyList = next();
     else if (a == "--walk-mode") walkMode = true;
-    else if (a == "--alpha") alpha = std::stod(next());
+    else if (a == "--alpha") { alpha = std::stod(next()); alphaSet = true; }
+    else if (a == "--precise-mode") preciseMode = true;
+    else if (a == "--precise-dump") preciseDump = true;
+    else if (a == "--precise-config") preciseConfig = next();
+    else if (a == "--precise-reps") preciseReps = std::stoi(next());
     else if (a == "--sloth-onnx") slothOnnx = next();
     else if (a == "--walk-reps") walkReps = std::stoi(next());
     else {
@@ -336,6 +523,27 @@ int main(int argc, char** argv) {
     return 1;
   }
   fprintf(stderr, "LM loaded in %.0f ms\n", MsSince(t0));
+
+  // ---- precise mode
+  if (preciseMode) {
+#ifdef RESCORER_BENCH_WITH_SLOTH
+    McBopomofo::PreciseConfig cfg;
+    if (!preciseConfig.empty()) {
+      std::string err;
+      if (!McBopomofo::PreciseConfig::LoadFile(preciseConfig, &cfg, &err)) {
+        fprintf(stderr, "bad precise config: %s\n", err.c_str());
+        return 2;
+      }
+    }
+    if (kSet) cfg.k = k;
+    if (alphaSet) cfg.alpha = alpha;
+    return RunPreciseMode(items, lm, slothDir, slothOnnx, slothThreads, qwenPath, skipQwen, cfg,
+                          preciseDump, preciseReps, outDir, tag);
+#else
+    fprintf(stderr, "precise mode needs the Sloth backend\n");
+    return 2;
+#endif
+  }
 
   // ---- R-walk mode
   if (walkMode) {
