@@ -1,5 +1,5 @@
 # Rescorer library targets. Each backend is an option() block so they can be
-# added independently (RESCORER_SLOTH here; RESCORER_QWEN is added elsewhere).
+# added independently (RESCORER_SLOTH, RESCORER_ELECTRA, RESCORER_QWEN).
 #
 # Usable standalone:  cmake -S Source/Engine/Rescorer -B build-rescorer-sloth
 # or via add_subdirectory(Rescorer) from Source/Engine.
@@ -69,6 +69,65 @@ if (RESCORER_SLOTH)
 endif ()
 
 # ---------------------------------------------------------------------------
+# ELECTRA-small discriminator (onnxruntime, int8) + ensemble combiner
+# ---------------------------------------------------------------------------
+option(RESCORER_ELECTRA "Build ElectraRescorer (hfl ELECTRA-small via onnxruntime)" ON)
+set(ELECTRA_MODEL_DIR
+    "${CMAKE_CURRENT_LIST_DIR}/../../../../models/electra"
+    CACHE PATH "ELECTRA model directory (model_int8.onnx, vocab.txt) used by electra_rescorer_test")
+if (RESCORER_ELECTRA)
+    set(ONNXRUNTIME_ROOT
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/onnxruntime/onnxruntime-osx-arm64-1.30.0"
+        CACHE PATH "onnxruntime prebuilt package root (include/ and lib/)")
+    find_library(ONNXRUNTIME_LIB onnxruntime
+        PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+
+    add_library(electra_rescorer STATIC electra_rescorer.h electra_rescorer.cpp rescorer.h)
+    target_include_directories(electra_rescorer
+        PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
+        PRIVATE "${ONNXRUNTIME_ROOT}/include")
+    target_link_libraries(electra_rescorer PUBLIC "${ONNXRUNTIME_LIB}")
+    target_compile_features(electra_rescorer PUBLIC cxx_std_17)
+endif ()
+
+# Ensemble combiner has no model dependency (z-score + weights + fallback).
+option(RESCORER_ENSEMBLE "Build EnsembleRescorer (combines Rescorers)" ON)
+if (RESCORER_ENSEMBLE)
+    add_library(ensemble_rescorer STATIC ensemble_rescorer.h ensemble_rescorer.cpp rescorer.h)
+    target_include_directories(ensemble_rescorer PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
+    target_compile_features(ensemble_rescorer PUBLIC cxx_std_17)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ensemble_rescorer PUBLIC Threads::Threads)
+endif ()
+
+if (ENABLE_TEST AND RESCORER_ENSEMBLE)
+    include(GoogleTest)
+    if (RESCORER_ELECTRA)
+        add_executable(electra_rescorer_test electra_rescorer_test.cpp)
+        target_link_libraries(electra_rescorer_test electra_rescorer GTest::gtest_main)
+        target_compile_definitions(electra_rescorer_test PRIVATE
+            ELECTRA_MODEL_DIR="${ELECTRA_MODEL_DIR}"
+            ELECTRA_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/electra_fixture.tsv")
+        set_target_properties(electra_rescorer_test PROPERTIES
+            BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+        gtest_discover_tests(electra_rescorer_test)
+    endif ()
+    add_executable(ensemble_rescorer_test ensemble_rescorer_test.cpp)
+    target_link_libraries(ensemble_rescorer_test ensemble_rescorer GTest::gtest_main)
+    if (RESCORER_ELECTRA AND RESCORER_SLOTH)
+        target_link_libraries(ensemble_rescorer_test sloth_rescorer electra_rescorer)
+        target_compile_definitions(ensemble_rescorer_test PRIVATE
+            ENSEMBLE_WITH_REAL_MODELS
+            SLOTH_MODEL_DIR="${SLOTH_MODEL_DIR}"
+            ELECTRA_MODEL_DIR="${ELECTRA_MODEL_DIR}"
+            DE_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/de_fixture.tsv")
+        set_target_properties(ensemble_rescorer_test PROPERTIES
+            BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+    endif ()
+    gtest_discover_tests(ensemble_rescorer_test)
+endif ()
+
+# ---------------------------------------------------------------------------
 # Qwen3-0.6B-Base (llama.cpp + Metal, statically linked)
 # ---------------------------------------------------------------------------
 option(RESCORER_QWEN "Build QwenRescorer (Qwen3-0.6B via llama.cpp)" ON)
@@ -134,6 +193,12 @@ if (RESCORER_BENCH AND (RESCORER_SLOTH OR RESCORER_QWEN))
     if (RESCORER_SLOTH)
         target_link_libraries(rescorer_bench PRIVATE sloth_rescorer)
         target_compile_definitions(rescorer_bench PRIVATE RESCORER_BENCH_WITH_SLOTH)
+        set_target_properties(rescorer_bench PROPERTIES
+            BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+    endif ()
+    if (RESCORER_ELECTRA AND RESCORER_ENSEMBLE)
+        target_link_libraries(rescorer_bench PRIVATE electra_rescorer ensemble_rescorer)
+        target_compile_definitions(rescorer_bench PRIVATE RESCORER_BENCH_WITH_ELECTRA)
         set_target_properties(rescorer_bench PROPERTIES
             BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
     endif ()
