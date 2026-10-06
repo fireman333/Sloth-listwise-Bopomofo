@@ -107,3 +107,38 @@ if (RESCORER_QWEN)
                 "${QWEN_NBEST}" "${QWEN_PY_RESULT}"
         DEPENDS qwen_rescorer_test)
 endif ()
+
+# ---------------------------------------------------------------------------
+# rescorer_bench: end-to-end C++ parity benchmark CLI (needs both backends)
+#   cmake -S Source/Engine/Rescorer -B build-bench -DENABLE_TEST=OFF
+#   cmake --build build-bench --target rescorer_bench
+# ---------------------------------------------------------------------------
+option(RESCORER_BENCH "Build rescorer_bench CLI (Sloth + Qwen + real McBopomofoLM)" ON)
+if (RESCORER_BENCH AND (RESCORER_SLOTH OR RESCORER_QWEN))
+    set(_engine_dir "${CMAKE_CURRENT_LIST_DIR}/..")
+    if (NOT TARGET McBopomofoLMLib)
+        # Standalone configure: pull in the engine libraries (no engine tests).
+        set(_saved_enable_test "${ENABLE_TEST}")
+        set(ENABLE_TEST OFF)
+        add_subdirectory("${_engine_dir}" "${CMAKE_CURRENT_BINARY_DIR}/engine" EXCLUDE_FROM_ALL)
+        set(ENABLE_TEST "${_saved_enable_test}")
+    endif ()
+    add_executable(rescorer_bench tools/rescorer_bench.cpp)
+    target_include_directories(rescorer_bench PRIVATE
+        "${_engine_dir}" "${_engine_dir}/gramambular2" "${CMAKE_CURRENT_LIST_DIR}"
+        "${LLAMA_CPP_ROOT}/vendor")
+    target_link_libraries(rescorer_bench PRIVATE McBopomofoLMLib gramambular2_lib)
+    # AFM Input/ directory (parent of AFMBopomofo/), with trailing slash.
+    get_filename_component(_bench_root "${CMAKE_CURRENT_LIST_DIR}/../../../.." REALPATH)
+    target_compile_definitions(rescorer_bench PRIVATE BENCH_ROOT="${_bench_root}/")
+    if (RESCORER_SLOTH)
+        target_link_libraries(rescorer_bench PRIVATE sloth_rescorer)
+        target_compile_definitions(rescorer_bench PRIVATE RESCORER_BENCH_WITH_SLOTH)
+        set_target_properties(rescorer_bench PROPERTIES
+            BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+    endif ()
+    if (RESCORER_QWEN)
+        target_link_libraries(rescorer_bench PRIVATE qwen_rescorer)
+        target_compile_definitions(rescorer_bench PRIVATE RESCORER_BENCH_WITH_QWEN)
+    endif ()
+endif ()
