@@ -143,6 +143,11 @@ class ReadingGrid {
 
     bool selectOverrideUnigram(const std::string& value, OverrideType type);
 
+    // Points the node at the unigram with the given index without marking it
+    // overridden (used by walkNBest() to describe alternative paths). Returns
+    // false if the index is out of range.
+    bool selectUnigramAt(size_t index);
+
     // A sufficiently high score to cause the walk to go through an overriding
     // node. Although this can be 0, setting it to a positive value has the
     // desirable side effect that it reduces the competition of "free-floating"
@@ -179,6 +184,9 @@ class ReadingGrid {
     size_t edges = 0;
     uint64_t elapsedMicroseconds = 0;
 
+    // Total path score. Only set by walkNBest().
+    double score = 0;
+
     // Convenient method for finding the node at the cursor. Returns
     // nodes.cend() if the value of cursor argument doesn't make sense. An
     // optional ourCursorPastNode argument can be used to obtain the cursor
@@ -204,12 +212,22 @@ class ReadingGrid {
         copiedNodes.push_back(std::make_shared<Node>(*n));
       }
 
-      return WalkResult{copiedNodes, totalReadings, vertices, edges,
-                        elapsedMicroseconds};
+      return WalkResult{copiedNodes, totalReadings,       vertices,
+                        edges,       elapsedMicroseconds, score};
     }
   };
 
   WalkResult walk();
+
+  // Returns up to k best walks (best first) whose joined value strings are all
+  // distinct. Every unigram of a node competes (not just the top one), so
+  // homophone alternatives show up. Results[0] equals walk() (same nodes). A
+  // node whose current unigram is the one used in the path is shared with the
+  // grid; otherwise the result holds a copy pointing at the chosen unigram, so
+  // pass each node's reading/value to overrideCandidate() to apply it.
+  // Overridden nodes keep their override as the only option. Returns empty for
+  // an empty grid or k == 0.
+  std::vector<WalkResult> walkNBest(size_t k);
 
   struct Candidate {
     Candidate(std::string r, std::string v, std::string rv = "")

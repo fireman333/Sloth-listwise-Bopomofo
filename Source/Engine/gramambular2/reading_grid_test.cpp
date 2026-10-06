@@ -27,6 +27,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -951,6 +952,110 @@ TEST(ReadingGridTest, CopyWithFixedNodesMustNotContainDanglingUnigramIter) {
   std::string val = walkBefore.nodes[0]->value();
 
   EXPECT_EQ(val, "司");  // should be the overriden one, not the default "斯"
+}
+
+static std::string JoinValues(const ReadingGrid::WalkResult& r) {
+  std::string s;
+  for (const auto& v : r.valuesAsStrings()) {
+    s += v;
+  }
+  return s;
+}
+
+static ReadingGrid MakeNBestGrid() {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  for (const char* r : {"ㄍㄠ", "ㄎㄜ", "ㄐㄧˋ", "ㄍㄨㄥ", "ㄙ", "ㄉㄜ˙",
+                        "ㄋㄧㄢˊ", "ㄓㄨㄥ", "ㄐㄧㄤˇ", "ㄐㄧㄣ"}) {
+    grid.insertReading(r);
+  }
+  return grid;
+}
+
+TEST(ReadingGridTest, WalkNBestTop1EqualsWalk) {
+  ReadingGrid grid = MakeNBestGrid();
+  ReadingGrid::WalkResult walked = grid.walk();
+  auto nbest = grid.walkNBest(10);
+  ASSERT_FALSE(nbest.empty());
+  ASSERT_EQ(nbest[0].nodes.size(), walked.nodes.size());
+  for (size_t i = 0; i < walked.nodes.size(); ++i) {
+    EXPECT_EQ(nbest[0].nodes[i], walked.nodes[i]);  // same grid node
+    EXPECT_EQ(nbest[0].nodes[i]->value(), walked.nodes[i]->value());
+    EXPECT_EQ(nbest[0].nodes[i]->reading(), walked.nodes[i]->reading());
+  }
+  EXPECT_EQ(nbest[0].totalReadings, walked.totalReadings);
+  EXPECT_EQ(nbest[0].valuesAsStrings(), walked.valuesAsStrings());
+}
+
+TEST(ReadingGridTest, WalkNBestDistinctAndSorted) {
+  ReadingGrid grid = MakeNBestGrid();
+  auto nbest = grid.walkNBest(10);
+  ASSERT_EQ(nbest.size(), 10u);
+  std::set<std::string> seen;
+  for (size_t i = 0; i < nbest.size(); ++i) {
+    EXPECT_TRUE(seen.insert(JoinValues(nbest[i])).second)
+        << "duplicate: " << JoinValues(nbest[i]);
+    EXPECT_EQ(nbest[i].totalReadings, grid.length());
+    if (i > 0) {
+      EXPECT_GE(nbest[i - 1].score, nbest[i].score);
+    }
+    // Score must equal the sum of the chosen unigram scores.
+    double sum = 0;
+    for (const auto& n : nbest[i].nodes) {
+      sum += n->currentUnigram().score();
+    }
+    EXPECT_NEAR(sum, nbest[i].score, 1e-9);
+  }
+  // Smaller k is a prefix of larger k.
+  auto top3 = grid.walkNBest(3);
+  ASSERT_EQ(top3.size(), 3u);
+  for (size_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(JoinValues(top3[i]), JoinValues(nbest[i]));
+  }
+}
+
+TEST(ReadingGridTest, WalkNBestKLargerThanPossible) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  grid.insertReading("ㄙ");  // 7 distinct unigram values
+  auto nbest = grid.walkNBest(100);
+  ASSERT_EQ(nbest.size(), 7u);
+  EXPECT_EQ(JoinValues(nbest[0]), "斯");
+  EXPECT_EQ(nbest[0].nodes[0], grid.walk().nodes[0]);
+  EXPECT_EQ(JoinValues(nbest[1]), "思");
+  EXPECT_EQ(JoinValues(nbest[6]), "司");  // lowest, ties keep unigram order
+}
+
+TEST(ReadingGridTest, WalkNBestEmptyGridAndZeroK) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  EXPECT_TRUE(grid.walkNBest(10).empty());
+  grid.insertReading("ㄙ");
+  EXPECT_TRUE(grid.walkNBest(0).empty());
+}
+
+TEST(ReadingGridTest, WalkNBestResultCanBeAppliedViaOverride) {
+  ReadingGrid grid = MakeNBestGrid();
+  auto nbest = grid.walkNBest(10);
+  ASSERT_GE(nbest.size(), 2u);
+  const auto& pick = nbest[1];
+  size_t loc = 0;
+  for (const auto& n : pick.nodes) {
+    ASSERT_TRUE(grid.overrideCandidate(
+        loc, ReadingGrid::Candidate(n->reading(), n->value())));
+    loc += n->spanningLength();
+  }
+  EXPECT_EQ(JoinValues(grid.walk()), JoinValues(pick));
+}
+
+TEST(ReadingGridTest, WalkNBestRespectsOverride) {
+  ReadingGrid grid(std::make_shared<SimpleLM>(kSampleData));
+  grid.setReadingSeparator("");
+  grid.insertReading("ㄙ");
+  ASSERT_TRUE(grid.overrideCandidate(0, "司"));
+  auto nbest = grid.walkNBest(5);
+  ASSERT_EQ(nbest.size(), 1u);
+  EXPECT_EQ(JoinValues(nbest[0]), "司");
+  EXPECT_EQ(nbest[0].nodes[0], grid.walk().nodes[0]);
 }
 
 }  // namespace Formosa::Gramambular2

@@ -207,6 +207,139 @@ ReadingGrid::WalkResult ReadingGrid::walk() {
   return result;
 }
 
+std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBest(size_t k) {
+  std::vector<WalkResult> results;
+  if (spans_.empty() || k == 0) {
+    return results;
+  }
+  int64_t start = GetEpochNowInMicroseconds();
+
+  // A partial path ending at some position, identified by its joined string.
+  // Back-pointers (prevPos, prevEntry) let us rebuild the node sequence.
+  struct Entry {
+    std::string text;
+    double score = 0;
+    uint64_t seq = 0;  // Order in which the current score was achieved.
+    size_t prevPos = 0;
+    size_t prevEntry = 0;
+    NodePtr node;
+    size_t unigramIndex = 0;
+  };
+
+  const size_t readingLen = readings_.size();
+  std::vector<std::vector<Entry>> table(readingLen + 1);
+  table[0].push_back(Entry{});
+  uint64_t seq = 0;
+  size_t reachableStates = 0;
+  size_t evaluatedEdges = 0;
+
+  for (size_t i = 0; i < readingLen; ++i) {
+    if (table[i].empty()) {
+      continue;
+    }
+    ++reachableStates;
+
+    // Keep the top k distinct prefixes at this position.
+    const std::vector<Entry>& entries = table[i];
+    std::vector<size_t> order(entries.size());
+    for (size_t j = 0; j < order.size(); ++j) {
+      order[j] = j;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      if (entries[a].score != entries[b].score) {
+        return entries[a].score > entries[b].score;
+      }
+      return entries[a].seq < entries[b].seq;
+    });
+    if (order.size() > k) {
+      order.resize(k);
+    }
+
+    const Span& span = spans_[i];
+    for (size_t spanLen = 1; spanLen <= span.maxLength(); ++spanLen) {
+      const NodePtr& node = span.nodeOf(spanLen);
+      if (node == nullptr) {
+        continue;
+      }
+      ++evaluatedEdges;
+
+      // The unigram indices this node offers. An overridden node offers only
+      // its current unigram.
+      const auto& unigrams = node->unigrams();
+      size_t optionBegin = 0;
+      size_t optionEnd = std::max<size_t>(unigrams.size(), 1);
+      if (node->isOverridden() && !unigrams.empty()) {
+        const std::string current = node->value();
+        optionBegin = static_cast<size_t>(
+            std::distance(unigrams.begin(),
+                          std::find_if(unigrams.begin(), unigrams.end(),
+                                       [&](const LanguageModel::Unigram& u) {
+                                         return u.value() == current;
+                                       })));
+        optionEnd = optionBegin + 1;
+      }
+
+      std::vector<Entry>& target = table[i + spanLen];
+      for (size_t idx : order) {
+        for (size_t u = optionBegin; u < optionEnd; ++u) {
+          std::string value = unigrams.empty() ? "" : unigrams[u].value();
+          double add = (node->isOverridden() || unigrams.empty())
+                           ? node->score()
+                           : unigrams[u].score();
+          std::string text = entries[idx].text + value;
+          double score = entries[idx].score + add;
+          auto it =
+              std::find_if(target.begin(), target.end(),
+                           [&](const Entry& e) { return e.text == text; });
+          if (it == target.end()) {
+            target.push_back(
+                Entry{std::move(text), score, seq++, i, idx, node, u});
+          } else if (score > it->score) {
+            *it = Entry{std::move(text), score, seq++, i, idx, node, u};
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<Entry>& finals = table[readingLen];
+  std::stable_sort(finals.begin(), finals.end(),
+                   [](const Entry& a, const Entry& b) {
+                     if (a.score != b.score) {
+                       return a.score > b.score;
+                     }
+                     return a.seq < b.seq;
+                   });
+  if (finals.size() > k) {
+    finals.resize(k);
+  }
+
+  for (const Entry& end : finals) {
+    WalkResult result;
+    result.score = end.score;
+    result.vertices = reachableStates;
+    result.edges = evaluatedEdges;
+    const Entry* e = &end;
+    size_t pos = readingLen;
+    while (pos > 0) {
+      NodePtr node = e->node;
+      if (e->unigramIndex != 0 && !node->isOverridden()) {
+        node = std::make_shared<Node>(*node);
+        node->selectUnigramAt(e->unigramIndex);
+      }
+      result.totalReadings += node->spanningLength();
+      result.nodes.push_back(std::move(node));
+      const size_t prevPos = e->prevPos;
+      e = &table[prevPos][e->prevEntry];
+      pos = prevPos;
+    }
+    std::reverse(result.nodes.begin(), result.nodes.end());
+    result.elapsedMicroseconds = GetEpochNowInMicroseconds() - start;
+    results.push_back(std::move(result));
+  }
+  return results;
+}
+
 std::vector<ReadingGrid::Candidate> ReadingGrid::candidatesAt(size_t loc) {
   std::vector<ReadingGrid::Candidate> result;
   if (readings_.empty()) {
@@ -490,6 +623,14 @@ bool ReadingGrid::Node::selectOverrideUnigram(
     }
   }
   return false;
+}
+
+bool ReadingGrid::Node::selectUnigramAt(size_t index) {
+  if (index >= unigrams_.size()) {
+    return false;
+  }
+  unigramIter_ = std::next(unigrams_.begin(), static_cast<ptrdiff_t>(index));
+  return true;
 }
 
 std::vector<ReadingGrid::NodePtr>::const_iterator
