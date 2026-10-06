@@ -16,7 +16,8 @@ xcuserdata
 .vscode
 __pycache__
 codecov_comment.md
-DerivedDatabuild-engine/
+DerivedData
+build-engine/
 build-xcode/
 build-rescorer-*/
 27.0-*/
