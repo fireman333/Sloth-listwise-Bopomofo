@@ -18,3 +18,4 @@ __pycache__
 codecov_comment.md
 DerivedDatabuild-engine/
 build-xcode/
+build-rescorer-*/
