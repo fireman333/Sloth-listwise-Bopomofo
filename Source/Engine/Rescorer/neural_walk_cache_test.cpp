@@ -179,25 +179,37 @@ TEST_F(NeuralCacheTest, ComputeAndWalkFallbacks) {
   EXPECT_TRUE(used);
 }
 
+TEST(NeuralCircuitBreakerTest, ThresholdIs30Ms) {
+  EXPECT_DOUBLE_EQ(NeuralCircuitBreaker::kThresholdMs, 30.0);
+  EXPECT_EQ(NeuralCircuitBreaker::kConsecutive, 3);
+}
+
 TEST(NeuralCircuitBreakerTest, ThreeSlowTrips) {
   NeuralCircuitBreaker b;
-  b.record(11);
-  b.record(12);
+  b.record(31);
+  b.record(35);
   EXPECT_FALSE(b.tripped());
-  b.record(30);
+  b.record(60);
   EXPECT_TRUE(b.tripped());
 }
 
 TEST(NeuralCircuitBreakerTest, FastResetsStreak) {
   NeuralCircuitBreaker b;
-  b.record(11);
+  b.record(31);
   b.record(2);
-  b.record(11);
-  b.record(11);
+  b.record(31);
+  b.record(31);
   EXPECT_FALSE(b.tripped());
-  b.record(10.0);  // exactly the threshold is not slow
-  b.record(11);
-  b.record(11);
+  b.record(30.0);  // exactly the threshold is not slow
+  b.record(31);
+  b.record(31);
+  EXPECT_FALSE(b.tripped());
+}
+
+TEST(NeuralCircuitBreakerTest, IdleGapLatencyDoesNotTrip) {
+  // Keystrokes after idle gaps (design D9: ~10-25 ms) never trip.
+  NeuralCircuitBreaker b;
+  for (int i = 0; i < 100; ++i) b.record(i % 2 ? 25.0 : 29.9);
   EXPECT_FALSE(b.tripped());
 }
 

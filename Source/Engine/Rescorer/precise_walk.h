@@ -22,6 +22,7 @@
 #ifndef SOURCE_ENGINE_RESCORER_PRECISE_WALK_H_
 #define SOURCE_ENGINE_RESCORER_PRECISE_WALK_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,65 @@ PreciseDecision PreciseSelect(const std::vector<std::string>& readings,
                               const std::vector<std::string>& candidates,
                               const std::vector<double>& rScores,
                               Rescorer* heavy, const PreciseConfig& config);
+
+// R N-best on a precomputed score table: paths[i] / texts[i] / rScores[i]
+// are aligned, best R first (paths[0] has the walkWithCharBonus values, up
+// to ties).
+struct PreciseCandidateSet {
+  std::vector<Formosa::Gramambular2::ReadingGrid::WalkResult> paths;
+  std::vector<std::string> texts;     // joined node values
+  std::vector<double> rScores;        // bonus-inclusive path scores
+  size_t size() const { return texts.size(); }
+  bool empty() const { return texts.empty(); }
+};
+
+// Step 1 without the forward pass: walkNBestWithCharBonus(config.k,
+// config.alpha, scores) on the grid. Returns an empty set for an empty grid,
+// k == 0, or scores.table.size() != grid.length() (no plain-walk fallback;
+// that is the caller's decision).
+PreciseCandidateSet PreciseCandidates(
+    Formosa::Gramambular2::ReadingGrid& grid,
+    const Formosa::Gramambular2::ReadingGrid::PositionalCharScores& scores,
+    const PreciseConfig& config);
+
+// A position range fixed by an override (manual pick or user-override-model
+// suggestion): reading positions [location, location + length) show value.
+struct FixedPosition {
+  size_t location = 0;
+  size_t length = 0;
+  std::string value;
+};
+
+// Every overridden node of the grid (any override type), by location.
+std::vector<FixedPosition> FixedPositionsOf(
+    const Formosa::Gramambular2::ReadingGrid& grid);
+
+// True if the path shows each fixed value at its positions. A path node that
+// spans exactly the fixed range must carry the fixed value; otherwise the
+// characters placed at the fixed positions (nodes split one code point per
+// reading) must equal the value's code points. A path whose node at a fixed
+// position cannot be split per reading (code points != spanning length)
+// does not keep that position.
+bool KeepsFixedPositions(
+    const Formosa::Gramambular2::ReadingGrid::WalkResult& path,
+    const std::vector<FixedPosition>& fixed);
+
+// Drops candidates that change a fixed position; relative order is kept.
+void FilterFixedPositions(PreciseCandidateSet* set,
+                          const std::vector<FixedPosition>& fixed);
+
+// Moves the candidate whose text equals displayed to rank 0, keeping the
+// relative order of the others. Returns its original rank, or npos if the
+// text is not among the candidates (set unchanged).
+size_t MoveDisplayedToFront(PreciseCandidateSet* set,
+                            const std::string& displayed);
+
+// Steps 2-3 without the heavy model: the calibrated gate on a (filtered,
+// displayed-first) candidate set. std::nullopt when fewer than 2 candidates
+// remain (gate not evaluated, no request).
+std::optional<PreciseDecision> PreciseGate(
+    const std::vector<std::string>& readings, const PreciseCandidateSet& set,
+    const PreciseConfig& config);
 
 struct PreciseWalkResult {
   Formosa::Gramambular2::ReadingGrid::WalkResult walk;  // chosen path

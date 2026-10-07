@@ -5,6 +5,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 
 #include "sloth_rescorer.h"
@@ -64,6 +65,18 @@ std::string Join(const ReadingGrid::WalkResult& r) {
   std::string s;
   for (const auto& n : r.nodes) s += n->value();
   return s;
+}
+
+// UTF-8 code points of s (invalid lead bytes are taken as single bytes).
+void SplitCodePoints(const std::string& s, std::vector<std::string>* out) {
+  out->clear();
+  for (size_t i = 0; i < s.size();) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+    if (i + n > s.size()) n = s.size() - i;
+    out->push_back(s.substr(i, n));
+    i += n;
+  }
 }
 
 }  // namespace
@@ -179,6 +192,108 @@ PreciseDecision PreciseSelect(const std::vector<std::string>& readings,
   return d;
 }
 
+PreciseCandidateSet PreciseCandidates(
+    ReadingGrid& grid, const ReadingGrid::PositionalCharScores& scores,
+    const PreciseConfig& config) {
+  PreciseCandidateSet set;
+  if (grid.length() == 0 || config.k == 0 || scores.table.size() != grid.length()) {
+    return set;
+  }
+  set.paths = grid.walkNBestWithCharBonus(config.k, config.alpha, scores);
+  for (const auto& w : set.paths) {
+    set.texts.push_back(Join(w));
+    set.rScores.push_back(w.score);
+  }
+  return set;
+}
+
+std::vector<FixedPosition> FixedPositionsOf(const ReadingGrid& grid) {
+  std::vector<FixedPosition> out;
+  const auto& spans = grid.spans();
+  for (size_t loc = 0; loc < spans.size(); ++loc) {
+    const auto& span = spans[loc];
+    for (size_t len = 1; len <= span.maxLength(); ++len) {
+      const auto& node = span.nodeOf(len);
+      if (node != nullptr && node->isOverridden()) {
+        out.push_back({loc, node->spanningLength(), node->value()});
+      }
+    }
+  }
+  return out;
+}
+
+bool KeepsFixedPositions(const ReadingGrid::WalkResult& path,
+                         const std::vector<FixedPosition>& fixed) {
+  if (fixed.empty()) return true;
+  // Per reading position: the code point the path places there, or nullopt
+  // if the covering node cannot be split one code point per reading.
+  // Also remember node boundaries for the exact-span check.
+  std::vector<std::optional<std::string>> perPos;
+  std::vector<std::pair<size_t, const ReadingGrid::NodePtr*>> starts;  // (pos, node)
+  std::vector<std::string> cps;
+  for (const auto& node : path.nodes) {
+    const size_t len = node->spanningLength();
+    starts.emplace_back(perPos.size(), &node);
+    SplitCodePoints(node->value(), &cps);
+    const bool aligned = cps.size() == len;
+    for (size_t j = 0; j < len; ++j) {
+      perPos.push_back(aligned ? std::optional<std::string>(cps[j]) : std::nullopt);
+    }
+  }
+  for (const auto& f : fixed) {
+    if (f.length == 0 || f.location + f.length > perPos.size()) return false;
+    bool exact = false;
+    for (const auto& [pos, nodePtr] : starts) {
+      if (pos == f.location && (*nodePtr)->spanningLength() == f.length) {
+        exact = (*nodePtr)->value() == f.value;
+        if (!exact) return false;
+        break;
+      }
+    }
+    if (exact) continue;
+    SplitCodePoints(f.value, &cps);
+    if (cps.size() != f.length) return false;
+    for (size_t j = 0; j < f.length; ++j) {
+      const auto& c = perPos[f.location + j];
+      if (!c.has_value() || *c != cps[j]) return false;
+    }
+  }
+  return true;
+}
+
+void FilterFixedPositions(PreciseCandidateSet* set,
+                          const std::vector<FixedPosition>& fixed) {
+  if (set == nullptr || fixed.empty()) return;
+  PreciseCandidateSet kept;
+  for (size_t i = 0; i < set->size(); ++i) {
+    if (!KeepsFixedPositions(set->paths[i], fixed)) continue;
+    kept.paths.push_back(std::move(set->paths[i]));
+    kept.texts.push_back(std::move(set->texts[i]));
+    kept.rScores.push_back(set->rScores[i]);
+  }
+  *set = std::move(kept);
+}
+
+size_t MoveDisplayedToFront(PreciseCandidateSet* set, const std::string& displayed) {
+  if (set == nullptr) return std::string::npos;
+  auto it = std::find(set->texts.begin(), set->texts.end(), displayed);
+  if (it == set->texts.end()) return std::string::npos;
+  const size_t idx = static_cast<size_t>(std::distance(set->texts.begin(), it));
+  if (idx > 0) {
+    std::rotate(set->paths.begin(), set->paths.begin() + idx, set->paths.begin() + idx + 1);
+    std::rotate(set->texts.begin(), set->texts.begin() + idx, set->texts.begin() + idx + 1);
+    std::rotate(set->rScores.begin(), set->rScores.begin() + idx, set->rScores.begin() + idx + 1);
+  }
+  return idx;
+}
+
+std::optional<PreciseDecision> PreciseGate(const std::vector<std::string>& readings,
+                                           const PreciseCandidateSet& set,
+                                           const PreciseConfig& config) {
+  if (set.size() < 2) return std::nullopt;
+  return PreciseSelect(readings, set.texts, set.rScores, nullptr, config);
+}
+
 PreciseWalkResult PreciseWalk(ReadingGrid& grid, SlothRescorer* rModel,
                               Rescorer* heavy, const PreciseConfig& config) {
   PreciseWalkResult res;
@@ -200,17 +315,14 @@ PreciseWalkResult PreciseWalk(ReadingGrid& grid, SlothRescorer* rModel,
   if (scores.table.size() != grid.length()) return plain();
 
   t0 = Clock::now();
-  std::vector<ReadingGrid::WalkResult> nb =
-      grid.walkNBestWithCharBonus(config.k, config.alpha, scores);
+  PreciseCandidateSet nb = PreciseCandidates(grid, scores, config);
   res.nbestMs = MsSince(t0);
   if (nb.empty()) return plain();
   res.usedNeural = true;
-  for (const auto& w : nb) {
-    res.candidates.push_back(Join(w));
-    res.rScores.push_back(w.score);
-  }
+  res.candidates = std::move(nb.texts);
+  res.rScores = std::move(nb.rScores);
   res.decision = PreciseSelect(grid.readings(), res.candidates, res.rScores, heavy, config);
-  res.walk = nb[std::min(res.decision.chosen, nb.size() - 1)];
+  res.walk = nb.paths[std::min(res.decision.chosen, nb.paths.size() - 1)];
   res.totalMs = MsSince(tStart);
   return res;
 }

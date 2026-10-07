@@ -196,6 +196,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
         // used until it is ready (or forever, if it is missing or fails).
         AFMNeuralSelector.shared.syncWithPreferences()
 
+        // Precise mode: if AFMPreciseModeEnabled is already on, start loading
+        // the heavy model in the background now (off by default).
+        AFMPreciseController.shared.syncWithPreferences()
+
         if Preferences.defaults.object(forKey: kCheckUpdateAutomatically) == nil {
             Preferences.defaults.set(true, forKey: kCheckUpdateAutomatically)
             Preferences.defaults.synchronize()

@@ -71,14 +71,20 @@ if (ENABLE_TEST)
                 ByteBlockBackedDictionaryTest.cpp
                 McBopomofoLMTest.cpp
                 MemoryMappedFileTest.cpp
+                NBestEquivalenceTest.cpp
                 ParselessLMTest.cpp
                 ParselessPhraseDBTest.cpp
                 PhraseReplacementMapTest.cpp
+                ReadingPolicyTest.cpp
+                UserPhraseCharBonusTest.cpp
                 UTF8HelperTest.cpp
                 UserOverrideModelTest.cpp
                 UserPhrasesLMTest.cpp
                 VariantAnnotatorTest.cpp)
         target_link_libraries(McBopomofoLMLibTest GTest::gtest_main McBopomofoLMLib gramambular2_lib)
+        target_compile_definitions(McBopomofoLMLibTest PRIVATE
+                READING_POLICY_DATA_DIR="${CMAKE_CURRENT_LIST_DIR}/../Data"
+                NBEST_BENCH_JSONL="${CMAKE_CURRENT_LIST_DIR}/../../../bench/data/general/test.jsonl")
         include(GoogleTest)
         gtest_discover_tests(McBopomofoLMLibTest)
 

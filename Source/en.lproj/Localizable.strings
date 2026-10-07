@@ -260,3 +260,36 @@
 "You can run a script to use git to backup your phrases. The script will run in the folder of your user phrases folder." = "You can run a script to use git to backup your phrases. The script will run in the folder of your user phrases folder.";
 
 "Quick Text Transform" = "Quick Text Transform";
+
+/* Selection model tab (precise-mode-and-preferences) */
+"Selection Model" = "Selection Model";
+"Neural Selection:" = "Neural Selection:";
+"Choose characters with the neural model" = "Choose characters with the neural model";
+"Precise Mode:" = "Precise Mode:";
+"Re-rank uncertain results in the background" = "Re-rank uncertain results in the background";
+"Precise mode uses about 1 GB of memory while it is on. Its model is installed separately." = "Precise mode uses about 1 GB of memory while it is on. Its model is installed separately.";
+"Reading of 癌:" = "Reading of 癌:";
+"Also accept ㄧㄢˊ (default: ㄞˊ only)" = "Also accept ㄧㄢˊ (default: ㄞˊ only)";
+"These settings take effect the next time you switch to this input method; precise mode starts loading right away." = "These settings take effect the next time you switch to this input method; precise mode starts loading right away.";
+"Domain Packs:" = "Domain Packs:";
+"Not yet available" = "Not yet available";
+"Status: %@" = "Status: %@";
+"Loading" = "Loading";
+"Ready" = "Ready";
+"Model not found" = "Model not found";
+"Failed to load" = "Failed to load";
+"Stopped (too slow)" = "Stopped (too slow)";
+"Industry" = "Industry";
+"Traditional Chinese Medicine" = "Traditional Chinese Medicine";
+"Biology" = "Biology";
+"Western Medicine" = "Western Medicine";
+"Buddhism" = "Buddhism";
+"Law and Politics" = "Law and Politics";
+"Physics and Chemistry" = "Physics and Chemistry";
+"Architecture" = "Architecture";
+"Military" = "Military";
+"Business" = "Business";
+"Education" = "Education";
+"Telecommunications" = "Telecom";
+"Sports" = "Sports";
+"Computers" = "Computers";

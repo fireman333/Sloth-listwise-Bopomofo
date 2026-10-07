@@ -31,9 +31,69 @@ struct KeyboardLayoutOption: Identifiable, Hashable {
     let localizedName: String
 }
 
+/// Status of a selection model as shown next to its switch (preferences spec).
+enum SelectionModelStatus: Equatable {
+    case off
+    case loading
+    case ready
+    case notFound
+    case failed
+    case tooSlow
+
+    /// Localizable.strings key.
+    var titleKey: String {
+        switch self {
+        case .off: "Off"
+        case .loading: "Loading"
+        case .ready: "Ready"
+        case .notFound: "Model not found"
+        case .failed: "Failed to load"
+        case .tooSlow: "Stopped (too slow)"
+        }
+    }
+
+    /// R-walk: off while the switch is off, else the selector's state.
+    static func neural(enabled: Bool, state: AFMNeuralSelectorState) -> SelectionModelStatus {
+        guard enabled else { return .off }
+        switch state {
+        case .disabled: return .off
+        case .loading: return .loading
+        case .ready: return .ready
+        case .notFound: return .notFound
+        case .failed: return .failed
+        case .tripped: return .tooSlow
+        @unknown default: return .failed
+        }
+    }
+
+    /// Precise mode: off while its switch is off, else the controller's state;
+    /// stopped too slow also when R-walk's breaker tripped (that stops precise
+    /// mode for the process too).
+    static func precise(
+        enabled: Bool, state: AFMPreciseState, neuralState: AFMNeuralSelectorState
+    ) -> SelectionModelStatus {
+        guard enabled else { return .off }
+        if neuralState == .tripped {
+            return .tooSlow
+        }
+        switch state {
+        case .off: return .off
+        case .loading: return .loading
+        case .ready: return .ready
+        case .notFound: return .notFound
+        case .failed: return .failed
+        case .tripped: return .tooSlow
+        @unknown default: return .failed
+        }
+    }
+}
+
 @MainActor
 final class PreferencesViewModel: NSObject, ObservableObject {
     private var defaultsObserver: NSObjectProtocol?
+    private var modelStateObservers: [NSObjectProtocol] = []
+    @Published private(set) var neuralSelectorState: AFMNeuralSelectorState = .disabled
+    @Published private(set) var preciseState: AFMPreciseState = .off
     @Published private(set) var basisKeyboardLayoutOptions: [KeyboardLayoutOption] = []
 
     var keyboardLayout: KeyboardLayout {
@@ -253,6 +313,68 @@ final class PreferencesViewModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: Selection model tab
+
+    /// R-walk switch (AFMNeuralWalkEnabled). Also synced to the selector right
+    /// away, so the status updates while the window is open; typing follows
+    /// no later than the next activation.
+    var neuralWalkEnabled: Bool {
+        get { Preferences.neuralWalkEnabled }
+        set {
+            objectWillChange.send()
+            Preferences.neuralWalkEnabled = newValue
+            AFMNeuralSelector.shared.syncWithPreferences()
+        }
+    }
+
+    /// Precise mode switch (AFMPreciseModeEnabled): loads or releases the
+    /// heavy model immediately, in the background.
+    var preciseModeEnabled: Bool {
+        get { Preferences.preciseModeEnabled }
+        set {
+            objectWillChange.send()
+            Preferences.preciseModeEnabled = newValue
+            AFMPreciseController.shared.enabled = newValue
+        }
+    }
+
+    /// Reading policy switch (AFMAcceptYanReadingForAi); applied on activation.
+    var acceptYanReadingForAi: Bool {
+        get { Preferences.acceptYanReadingForAi }
+        set {
+            objectWillChange.send()
+            Preferences.acceptYanReadingForAi = newValue
+        }
+    }
+
+    var neuralStatus: SelectionModelStatus {
+        .neural(enabled: neuralWalkEnabled, state: neuralSelectorState)
+    }
+
+    var preciseStatus: SelectionModelStatus {
+        .precise(enabled: preciseModeEnabled, state: preciseState, neuralState: neuralSelectorState)
+    }
+
+    private func observeModelStates() {
+        neuralSelectorState = AFMNeuralSelector.shared.state
+        preciseState = AFMPreciseController.shared.state
+        let center = NotificationCenter.default
+        modelStateObservers = [
+            center.addObserver(forName: .AFMNeuralSelectorStateDidChange, object: nil, queue: .main) {
+                [weak self] _ in
+                Task { @MainActor in
+                    self?.neuralSelectorState = AFMNeuralSelector.shared.state
+                }
+            },
+            center.addObserver(forName: .AFMPreciseControllerStateDidChange, object: nil, queue: .main) {
+                [weak self] _ in
+                Task { @MainActor in
+                    self?.preciseState = AFMPreciseController.shared.state
+                }
+            },
+        ]
+    }
+
     var showBopomofoFontAnnotationSupportItemInInputMenu: Bool {
         get { Preferences.showBopomofoFontAnnotationSupportItemInInputMenu }
         set {
@@ -281,6 +403,7 @@ final class PreferencesViewModel: NSObject, ObservableObject {
         super.init()
         Preferences.populateDefaults()
         loadBasisKeyboardLayoutOptions()
+        observeModelStates()
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: Preferences.defaults,
@@ -295,6 +418,9 @@ final class PreferencesViewModel: NSObject, ObservableObject {
     deinit {
         if let defaultsObserver {
             NotificationCenter.default.removeObserver(defaultsObserver)
+        }
+        for observer in modelStateObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 

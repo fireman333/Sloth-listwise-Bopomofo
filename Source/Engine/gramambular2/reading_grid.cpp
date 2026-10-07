@@ -29,6 +29,7 @@
 #include <memory>
 #include <stack>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -210,6 +211,30 @@ ReadingGrid::WalkResult ReadingGrid::walk() {
 
 namespace {
 void SplitCodePoints(const std::string& s, std::vector<std::string>* out);
+
+// Bonus score of character ch at reading position pos. A user-phrase unigram
+// gets the best score of the row (design D8: user phrases are never
+// disadvantaged by the bonus); an empty row or a position past the end scores
+// missingScore.
+double PositionBonus(const ReadingGrid::PositionalCharScores& scores,
+                     size_t pos, const std::string& ch, bool isUserPhrase) {
+  if (pos >= scores.table.size()) {
+    return scores.missingScore;
+  }
+  const auto& m = scores.table[pos];
+  if (isUserPhrase) {
+    if (m.empty()) {
+      return scores.missingScore;
+    }
+    double best = -std::numeric_limits<double>::infinity();
+    for (const auto& kv : m) {
+      best = std::max(best, kv.second);
+    }
+    return best;
+  }
+  auto it = m.find(ch);
+  return it == m.end() ? scores.missingScore : it->second;
+}
 }  // namespace
 
 std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBest(size_t k) {
@@ -234,24 +259,44 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBestImpl(
 
   // A partial path ending at some position, identified by its joined string.
   // Back-pointers (prevPos, prevEntry) let us rebuild the node sequence.
+  // `text` points at the key of index[pos] (node-based map keys never move);
+  // `node` points into spans_, which does not change during the walk.
   struct Entry {
-    std::string text;
+    const std::string* text = nullptr;
     double score = 0;
     uint64_t seq = 0;  // Order in which the current score was achieved.
     size_t prevPos = 0;
     size_t prevEntry = 0;
-    NodePtr node;
+    const NodePtr* node = nullptr;
     size_t unigramIndex = 0;
   };
 
+  static const std::string kEmpty;
   const size_t readingLen = readings_.size();
   std::vector<std::vector<Entry>> table(readingLen + 1);
-  table[0].push_back(Entry{});
+  // Per position: joined text -> index into table[pos] (dedup by text).
+  std::vector<std::unordered_map<std::string, size_t>> index(readingLen + 1);
+  table[0].push_back(Entry{&kEmpty});
   uint64_t seq = 0;
   size_t reachableStates = 0;
   size_t evaluatedEdges = 0;
   std::vector<double> optionAdds;
   std::vector<std::string> chars;
+  std::vector<size_t> order;
+  std::vector<size_t> byAdd;
+  std::vector<size_t> kept;
+  std::vector<size_t> keptForPrefix;
+  std::vector<const std::string*> distinctValues;
+  std::string text;
+
+  // Total order on entries of one position: higher score first, then the
+  // earlier-achieved one (seq is unique per position).
+  auto better = [](const Entry& a, const Entry& b) {
+    if (a.score != b.score) {
+      return a.score > b.score;
+    }
+    return a.seq < b.seq;
+  };
 
   for (size_t i = 0; i < readingLen; ++i) {
     if (table[i].empty()) {
@@ -259,20 +304,23 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBestImpl(
     }
     ++reachableStates;
 
-    // Keep the top k distinct prefixes at this position.
+    // Keep the top k distinct prefixes at this position. Keys are unique, so
+    // a partial sort gives the same prefix as a full stable sort.
     const std::vector<Entry>& entries = table[i];
-    std::vector<size_t> order(entries.size());
+    order.resize(entries.size());
     for (size_t j = 0; j < order.size(); ++j) {
       order[j] = j;
     }
-    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-      if (entries[a].score != entries[b].score) {
-        return entries[a].score > entries[b].score;
-      }
-      return entries[a].seq < entries[b].seq;
-    });
+    auto byEntry = [&](size_t a, size_t b) {
+      return better(entries[a], entries[b]);
+    };
     if (order.size() > k) {
+      std::partial_sort(order.begin(),
+                        order.begin() + static_cast<ptrdiff_t>(k), order.end(),
+                        byEntry);
       order.resize(k);
+    } else {
+      std::sort(order.begin(), order.end(), byEntry);
     }
 
     const Span& span = spans_[i];
@@ -312,55 +360,133 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBestImpl(
             !unigrams.empty()) {
           double bonus = 0;
           SplitCodePoints(unigrams[u].value(), &chars);
+          const bool userPhrase = unigrams[u].isUserPhrase();
           for (size_t j = 0; j < chars.size(); ++j) {
             const size_t pos = i + j;
             if (pos >= readingLen) {
               bonus += scores->missingScore;
               continue;
             }
-            const auto& m = scores->table[pos];
-            auto it = m.find(chars[j]);
-            bonus += it == m.end() ? scores->missingScore : it->second;
+            bonus += PositionBonus(*scores, pos, chars[j], userPhrase);
           }
           add += alpha * bonus;
         }
         optionAdds.push_back(add);
       }
 
+      // Option pruning (exact). Sort options by (add desc, index asc) and
+      // find the first m + 1 options that hold k distinct values; let
+      // threshold = add of the (m+1)-th. For a prefix with score P, an option
+      // u with P + add_u < P + threshold is dominated: either an option with
+      // the same value scores strictly higher from the same prefix (so u
+      // never sets its text's final entry), or k distinct texts from the same
+      // prefix score strictly higher (so its text cannot be in the top k at
+      // the target position). Skipping dominated options changes neither
+      // the top-k entries nor their relative seq order. Floating-point
+      // addition is monotone, so P + add is non-increasing along byAdd; ties
+      // created by rounding at the threshold are kept per prefix below.
+      const size_t n = optionEnd - optionBegin;
+      bool prune = false;
+      size_t cutoff = n;  // byAdd[0, cutoff) have add >= threshold
+      double threshold = 0;
+      kept.clear();
+      if (n > k) {
+        byAdd.resize(n);
+        for (size_t j = 0; j < n; ++j) {
+          byAdd[j] = j;
+        }
+        std::sort(byAdd.begin(), byAdd.end(), [&](size_t a, size_t b) {
+          if (optionAdds[a] != optionAdds[b]) {
+            return optionAdds[a] > optionAdds[b];
+          }
+          return a < b;
+        });
+        distinctValues.clear();
+        size_t m = 0;
+        for (; m < n; ++m) {
+          const std::string& v = unigrams[optionBegin + byAdd[m]].value();
+          if (std::none_of(distinctValues.begin(), distinctValues.end(),
+                           [&](const std::string* s) { return *s == v; })) {
+            distinctValues.push_back(&v);
+            if (distinctValues.size() == k) {
+              break;
+            }
+          }
+        }
+        if (m < n) {
+          threshold = optionAdds[byAdd[m]];
+          cutoff = m + 1;
+          while (cutoff < n && optionAdds[byAdd[cutoff]] >= threshold) {
+            ++cutoff;
+          }
+          prune = cutoff < n;
+        }
+      }
+      if (prune) {
+        kept.assign(byAdd.begin(),
+                    byAdd.begin() + static_cast<ptrdiff_t>(cutoff));
+        std::sort(kept.begin(), kept.end());
+      } else {
+        kept.resize(n);
+        for (size_t j = 0; j < n; ++j) {
+          kept[j] = j;
+        }
+      }
+
       std::vector<Entry>& target = table[i + spanLen];
+      auto& targetIndex = index[i + spanLen];
       for (size_t idx : order) {
-        for (size_t u = optionBegin; u < optionEnd; ++u) {
-          std::string value = unigrams.empty() ? "" : unigrams[u].value();
-          double add = optionAdds[u - optionBegin];
-          std::string text = entries[idx].text + value;
-          double score = entries[idx].score + add;
-          auto it =
-              std::find_if(target.begin(), target.end(),
-                           [&](const Entry& e) { return e.text == text; });
-          if (it == target.end()) {
+        const Entry& prefix = entries[idx];
+        const std::vector<size_t>* options = &kept;
+        if (prune) {
+          const double t = prefix.score + threshold;
+          if (prefix.score + optionAdds[byAdd[cutoff]] >= t) {
+            keptForPrefix = kept;
+            for (size_t j = cutoff;
+                 j < n && prefix.score + optionAdds[byAdd[j]] >= t; ++j) {
+              keptForPrefix.push_back(byAdd[j]);
+            }
+            std::sort(keptForPrefix.begin(), keptForPrefix.end());
+            options = &keptForPrefix;
+          }
+        }
+        for (size_t off : *options) {
+          const size_t u = optionBegin + off;
+          text.assign(*prefix.text);
+          text.append(unigrams.empty() ? kEmpty : unigrams[u].value());
+          const double score = prefix.score + optionAdds[off];
+          auto [it, inserted] = targetIndex.try_emplace(text, target.size());
+          if (inserted) {
             target.push_back(
-                Entry{std::move(text), score, seq++, i, idx, node, u});
-          } else if (score > it->score) {
-            *it = Entry{std::move(text), score, seq++, i, idx, node, u};
+                Entry{&it->first, score, seq++, i, idx, &node, u});
+          } else if (score > target[it->second].score) {
+            target[it->second] =
+                Entry{&it->first, score, seq++, i, idx, &node, u};
           }
         }
       }
     }
   }
 
-  std::vector<Entry>& finals = table[readingLen];
-  std::stable_sort(finals.begin(), finals.end(),
-                   [](const Entry& a, const Entry& b) {
-                     if (a.score != b.score) {
-                       return a.score > b.score;
-                     }
-                     return a.seq < b.seq;
-                   });
-  if (finals.size() > k) {
-    finals.resize(k);
+  const std::vector<Entry>& finals = table[readingLen];
+  order.resize(finals.size());
+  for (size_t j = 0; j < order.size(); ++j) {
+    order[j] = j;
+  }
+  auto byFinal = [&](size_t a, size_t b) {
+    return better(finals[a], finals[b]);
+  };
+  if (order.size() > k) {
+    std::partial_sort(order.begin(),
+                      order.begin() + static_cast<ptrdiff_t>(k), order.end(),
+                      byFinal);
+    order.resize(k);
+  } else {
+    std::sort(order.begin(), order.end(), byFinal);
   }
 
-  for (const Entry& end : finals) {
+  for (size_t f : order) {
+    const Entry& end = finals[f];
     WalkResult result;
     result.score = end.score;
     result.vertices = reachableStates;
@@ -368,7 +494,7 @@ std::vector<ReadingGrid::WalkResult> ReadingGrid::walkNBestImpl(
     const Entry* e = &end;
     size_t pos = readingLen;
     while (pos > 0) {
-      NodePtr node = e->node;
+      NodePtr node = *e->node;
       if (e->unigramIndex != 0 && !node->isOverridden()) {
         node = std::make_shared<Node>(*node);
         node->selectUnigramAt(e->unigramIndex);
@@ -451,15 +577,14 @@ ReadingGrid::WalkResult ReadingGrid::walkWithCharBonus(
           double bonus = 0;
           if (alpha != 0) {
             SplitCodePoints(unigrams[u].value(), &chars);
+            const bool userPhrase = unigrams[u].isUserPhrase();
             for (size_t j = 0; j < chars.size(); ++j) {
               const size_t pos = i + j;
               if (pos >= readingLen) {
                 bonus += scores.missingScore;
                 continue;
               }
-              const auto& m = scores.table[pos];
-              auto it = m.find(chars[j]);
-              bonus += it == m.end() ? scores.missingScore : it->second;
+              bonus += PositionBonus(scores, pos, chars[j], userPhrase);
             }
           }
           double x = unigrams[u].score() + alpha * bonus;

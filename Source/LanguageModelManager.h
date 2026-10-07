@@ -40,6 +40,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (nullable NSString *)readingFor:(NSString *)phrase;
 
+/// Reading policy (design D4): unless accepted, built-in entries and
+/// associated phrases that read 癌 as ㄧㄢˊ are filtered out of both language
+/// models. Bumps reloadGeneration when the policy changes.
++ (void)applyReadingPolicyAcceptingYanReadingForAi:(BOOL)accept NS_SWIFT_NAME(applyReadingPolicy(acceptYanReadingForAi:));
+
+/// Incremented on every language-model (re)load or policy change, so that a
+/// pending background re-ranking request made before it is discarded.
+@property (class, readonly, nonatomic) NSUInteger reloadGeneration;
+
 @property (class, readonly, nonatomic) NSString *dataFolderPath;
 @property (class, readonly, nonatomic) NSString *userPhrasesDataPathMcBopomofo;
 @property (class, readonly, nonatomic) NSString *userPhrasesDataPathPlainBopomofo;
@@ -57,6 +66,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)resetUserOverrideModelForTesting;
 /// Testing only: empties the Bopomofo-mode user and excluded phrases.
 + (void)clearUserPhrasesForTesting;
+/// Testing only: replaces the Bopomofo-mode user phrases with content
+/// (user-phrase file format) and empties the excluded phrases.
++ (void)loadUserPhrasesForTesting:(NSString *)content;
 @end
 
 @interface LanguageModelManager ()

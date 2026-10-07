@@ -192,13 +192,23 @@ class NeuralSelectorTests: XCTestCase {
 
     // MARK: - Model loading (task 3.2)
 
-    func testNonexistentModelDirectoryFails() {
+    func testNonexistentModelDirectoryIsNotFound() {
         let selector = AFMNeuralSelector(modelDirectory: NSTemporaryDirectory() + "/no-such-r-walk-\(UUID().uuidString)")
         selector.enabled = true
+        var notifiedStates: [AFMNeuralSelectorState] = []
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AFMNeuralSelectorStateDidChange, object: selector, queue: nil
+        ) { _ in
+            XCTAssertTrue(Thread.isMainThread)
+            notifiedStates.append(selector.state)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
         selector.startLoadingIfNeeded()
         XCTAssertEqual(selector.state, .loading)
         waitUntilLoaded(selector)
-        XCTAssertEqual(selector.state, .failed)
+        // Directory missing is reported apart from a load failure (preferences status).
+        XCTAssertEqual(selector.state, .notFound)
+        XCTAssertEqual(notifiedStates, [.loading, .notFound])
 
         AFMNeuralSelector.shared = selector
         XCTAssertEqual(composingBuffer(type("su3cl3", into: handler)), "你好")
@@ -316,7 +326,7 @@ class NeuralSelectorTests: XCTestCase {
 
     func testSlowScorerTripsToStockWalk() {
         let fake = FakeNeuralScorer(favored: ["妳"])
-        fake.delay = 0.012
+        fake.delay = 0.035  // over the 30 ms breaker threshold (D9)
         let selector = installFakeSelector(fake)
 
         type("su3su3su3", into: handler)
@@ -328,6 +338,26 @@ class NeuralSelectorTests: XCTestCase {
         XCTAssertEqual(fake.calls, 3)
         XCTAssertEqual(buffer, stockBuffer("su3"))
         XCTAssertEqual(buffer, "你")
+    }
+
+    /// D9: 25 ms keystrokes (over the old 10 ms threshold, under 30 ms) keep
+    /// R-walk; one 35 ms keystroke between fast ones does not trip either.
+    func testBreakerThreshold30Ms() {
+        let fake = FakeNeuralScorer(favored: ["妳"])
+        fake.delay = 0.025
+        let selector = installFakeSelector(fake)
+        type("su3su3su3su3", into: handler)
+        XCTAssertEqual(selector.state, .ready)
+        XCTAssertEqual(fake.calls, 4)
+
+        handler.clear()
+        fake.delay = 0.035
+        type("su3", into: handler)
+        fake.delay = 0.025
+        type("cl3", into: handler, from: handler.buildInputtingState())
+        fake.delay = 0.035
+        type("su3", into: handler, from: handler.buildInputtingState())
+        XCTAssertEqual(selector.state, .ready, "isolated slow keystrokes do not trip")
     }
 
     func testEmptyScoresFallBackAndRetry() {
@@ -494,6 +524,47 @@ class NeuralSelectorTests: XCTestCase {
         XCTAssertNotEqual(selector.state, .tripped)
     }
 
+    // MARK: - User phrases vs neural scoring (design D8, task 8.2)
+
+    /// Real-install regression: a user phrase made of rare characters
+    /// (錏錒 ㄧㄚˋ-ㄚ) must win with R-walk on, as it does with R-walk off.
+    func testRareCharUserPhraseWinsWithRealModel() throws {
+        let dir = try realModelDirectory()
+        LanguageModelManager.loadUserPhrases(forTesting: "錏錒 ㄧㄚˋ-ㄚ\n")
+        defer { LanguageModelManager.loadUserPhrases(enableForPlainBopomofo: Preferences.enableUserPhrasesInPlainBopomofo) }
+        let keys = standardLayoutKeys(forReading: "ㄧㄚˋ") + standardLayoutKeys(forReading: "ㄚ")
+
+        // R-walk off (stock walk).
+        XCTAssertEqual(stockBuffer(keys), "錏錒")
+        Preferences.neuralWalkEnabled = false
+        let offHandler = KeyHandler()
+        offHandler.inputMode = .bopomofo
+        XCTAssertEqual(composingBuffer(type(keys, into: offHandler)), "錏錒")
+        Preferences.neuralWalkEnabled = true
+
+        // R-walk on with the real model.
+        let selector = AFMNeuralSelector(modelDirectory: dir)
+        selector.enabled = true
+        selector.alpha = 0.5
+        selector.startLoadingIfNeeded()
+        waitUntilLoaded(selector, timeout: 20)
+        XCTAssertEqual(selector.state, .ready)
+        AFMNeuralSelector.shared = selector
+        LanguageModelManager.resetUserOverrideModelForTesting()
+        let onHandler = KeyHandler()
+        onHandler.inputMode = .bopomofo
+        let neural = selector.neuralWalkCount
+        XCTAssertEqual(composingBuffer(type(keys, into: onHandler)), "錏錒")
+        XCTAssertGreaterThan(selector.neuralWalkCount, neural, "R-walk was not used")
+
+        // Without the user phrase, R-walk picks something else (the case the
+        // flag exists for), so the assertion above is not vacuous.
+        LanguageModelManager.clearUserPhrasesForTesting()
+        let plain = KeyHandler()
+        plain.inputMode = .bopomofo
+        XCTAssertNotEqual(composingBuffer(type(keys, into: plain)), "錏錒")
+    }
+
     // MARK: - In-process latency (task 6.2, test-host interim evidence)
 
     /// Process physical footprint in MB (task_vm_info.phys_footprint).
@@ -512,6 +583,99 @@ class NeuralSelectorTests: XCTestCase {
     /// measures the wall time of every syllable-completing keystroke while the
     /// composing buffer grows from 1 to 40 syllables.
     func testInProcessLatencyUpTo40Syllables() throws {
+        try runInProcessLatency(precise: false)
+    }
+
+    /// Same with precise mode ready (task 5.5): fake heavy model (30 ms, gate
+    /// forced open), the end-of-key-event hook timed with each keystroke, and
+    /// background results applied between keystrokes (apply time reported).
+    func testInProcessLatencyUpTo40SyllablesPreciseReady() throws {
+        try runInProcessLatency(precise: true)
+    }
+
+    /// Diagnostic (AFM_PRECISE_DIAGNOSTIC=1): precise mode ready with the
+    /// breaker disabled, to see the per-length cost of N-best + gate
+    /// (payload_ms) on every buffer length.
+    /// Diagnostic (AFM_GAP_DIAGNOSTIC=1): precise mode off, R breaker
+    /// disabled, with AFM_KEY_GAP_MS typing gaps, to see R keystroke time
+    /// after idle gaps.
+    func testInProcessLatencyBreakerOffDiagnostic() throws {
+        guard ProcessInfo.processInfo.environment["AFM_GAP_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("set TEST_RUNNER_AFM_GAP_DIAGNOSTIC=1 to run")
+        }
+        try runInProcessLatency(precise: false, breaker: false)
+    }
+
+    func testPreciseNBestCostByLength() throws {
+        guard ProcessInfo.processInfo.environment["AFM_PRECISE_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("set AFM_PRECISE_DIAGNOSTIC=1 to run")
+        }
+        try runInProcessLatency(precise: true, breaker: false)
+    }
+
+    /// Diagnostic for task 7.1 (AFM_REAL_QWEN=1, i.e.
+    /// `TEST_RUNNER_AFM_REAL_QWEN=1 xcodebuild ... test`): the same harness
+    /// with the real QwenRescorer (../models/Qwen3-0.6B-Base-Q8_0.gguf, the
+    /// bench precise.conf with tau forced to 1 so the gate stays open), with
+    /// Qwen's production 4 CPU threads and with 2. Never runs by default (the
+    /// model is 640 MB). The R circuit breaker is disabled so every keystroke
+    /// is an R-walk keystroke; AFM_REAL_QWEN_BREAKER=1 keeps it on instead
+    /// (the run then reports whether and when it tripped).
+    func testInProcessLatencyRealQwen4Threads() throws {
+        try runInProcessLatency(precise: true, breaker: realQwenBreaker, realQwenThreads: try realQwenThreadsOrSkip(4))
+    }
+
+    func testInProcessLatencyRealQwen2Threads() throws {
+        try runInProcessLatency(precise: true, breaker: realQwenBreaker, realQwenThreads: try realQwenThreadsOrSkip(2))
+    }
+
+    /// AFM_REAL_QWEN_QOS = utility (default, production) | background | userInitiated.
+    private var realQwenQoS: qos_class_t {
+        switch ProcessInfo.processInfo.environment["AFM_REAL_QWEN_QOS"] {
+        case "background": return QOS_CLASS_BACKGROUND
+        case "userInitiated": return QOS_CLASS_USER_INITIATED
+        default: return QOS_CLASS_UTILITY
+        }
+    }
+
+    private var realQwenBreaker: Bool {
+        ProcessInfo.processInfo.environment["AFM_REAL_QWEN_BREAKER"] == "1"
+    }
+
+    private func realQwenThreadsOrSkip(_ threads: Int) throws -> Int {
+        guard ProcessInfo.processInfo.environment["AFM_REAL_QWEN"] == "1" else {
+            throw XCTSkip("set TEST_RUNNER_AFM_REAL_QWEN=1 to run")
+        }
+        return threads
+    }
+
+    /// Temp model directory for the real Qwen: model.gguf symlinked to the
+    /// bench GGUF, precise.conf = the bench calibration with tau = 1.
+    private func makeRealQwenDirectory() throws -> String {
+        let gguf = afmInputRoot.appendingPathComponent("models/Qwen3-0.6B-Base-Q8_0.gguf").path
+        let conf = afmInputRoot.appendingPathComponent("bench/out/general/precise/precise.conf").path
+        guard FileManager.default.fileExists(atPath: gguf),
+            let confText = try? String(contentsOfFile: conf, encoding: .utf8)
+        else {
+            throw XCTSkip("real Qwen model or precise.conf not found (\(gguf), \(conf))")
+        }
+        // AFM_REAL_QWEN_REAL_GATE=1 keeps the calibrated tau (realistic gate
+        // rate) instead of forcing the gate open.
+        let keepTau = ProcessInfo.processInfo.environment["AFM_REAL_QWEN_REAL_GATE"] == "1"
+        let forced = keepTau ? confText : confText.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces).hasPrefix("tau") ? "tau = 1.0" : String($0) }
+            .joined(separator: "\n")
+        XCTAssertTrue(keepTau || forced.contains("tau = 1.0"))
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent("qwen-real-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: (dir as NSString).appendingPathComponent("model.gguf"), withDestinationPath: gguf)
+        FileManager.default.createFile(
+            atPath: (dir as NSString).appendingPathComponent("precise.conf"), contents: Data(forced.utf8))
+        return dir
+    }
+
+    func runInProcessLatency(precise: Bool, breaker: Bool = true, realQwenThreads: Int? = nil) throws {
         let dir = try realModelDirectory()
         let jsonl = afmInputRoot.appendingPathComponent("bench/data/general/test.jsonl")
         guard let text = try? String(contentsOf: jsonl, encoding: .utf8) else {
@@ -535,42 +699,119 @@ class NeuralSelectorTests: XCTestCase {
         selector.startLoadingIfNeeded()
         waitUntilLoaded(selector, timeout: 30)
         XCTAssertEqual(selector.state, .ready)
+        selector.circuitBreakerDisabledForTesting = !breaker
         AFMNeuralSelector.shared = selector
         let rssLoaded = physFootprintMB()
+
+        let heavy = FakeHeavyScorer()
+        heavy.delay = 0.03
+        // Spin, not sleep: real Qwen computes; a sleeping fake lets the CPU cool and measures an artifact (real-Qwen p95 4.5 ms, ../PLAN.md).
+        heavy.spin = true
+        var preciseDirectory: String?
+        if precise {
+            let qwenDir: String
+            let controller: AFMPreciseController
+            if let threads = realQwenThreads {
+                qwenDir = try makeRealQwenDirectory()
+                controller = AFMPreciseController(
+                    modelDirectory: qwenDir, qwenThreadsForTesting: threads, queueQoSForTesting: realQwenQoS)
+            } else {
+                qwenDir = (NSTemporaryDirectory() as NSString).appendingPathComponent("qwen-latency-\(UUID().uuidString)")
+                try FileManager.default.createDirectory(atPath: qwenDir, withIntermediateDirectories: true)
+                FileManager.default.createFile(
+                    atPath: (qwenDir as NSString).appendingPathComponent("precise.conf"),
+                    contents: Data(kForcedOpenPreciseConf.utf8))
+                controller = AFMPreciseController(modelDirectory: qwenDir, heavyScoreBlockForTesting: heavy.block, loadDelay: 0)
+            }
+            preciseDirectory = qwenDir
+            AFMPreciseController.shared = controller
+            if let ms = Double(ProcessInfo.processInfo.environment["AFM_START_DELAY_MS"] ?? "") {
+                controller.startDelay = ms / 1000
+            }
+            controller.enabled = true
+            let deadline = Date().addingTimeInterval(realQwenThreads == nil ? 5 : 120)
+            while controller.state == .loading && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+            XCTAssertEqual(controller.state, .ready)
+        }
+        defer {
+            if precise {
+                AFMPreciseController.shared.enabled = false
+                AFMPreciseController.resetForTesting()
+                if let preciseDirectory = preciseDirectory {
+                    try? FileManager.default.removeItem(atPath: preciseDirectory)
+                }
+            }
+        }
 
         LanguageModelManager.clearUserPhrasesForTesting()
         defer { LanguageModelManager.loadUserPhrases(enableForPlainBopomofo: Preferences.enableUserPhrasesInPlainBopomofo) }
 
         let maxLen = Int(kAFMNeuralMaxSyllables)
-        let targetSamples = 2400
+        let targetSamples = Int(ProcessInfo.processInfo.environment["AFM_TARGET_SAMPLES"] ?? "") ?? 2400
         var samples: [(len: Int, ms: Double)] = []
-        var state: InputState = InputState.Empty()
+        var applySamples: [(len: Int, ms: Double)] = []
+        var payloadSamples: [(len: Int, ms: Double)] = []
+        let delegate = PreciseTestDelegate()
         var len = 0
         var errors = 0
         var skippedRuns = 0
         var cursor = 0
+        var requests: UInt = 0
+        var applied: UInt = 0
         let enter = KeyHandlerInput(
             inputText: " ", keyCode: KeyCode.enter.rawValue, charCode: 13, flags: [], isVerticalMode: false)
 
-        func resetRun() {
-            if len > 0 {
-                handler.handle(input: enter, state: state) { state = $0 } errorCallback: {}
-            }
+        func newHandler() {
+            requests += handler.preciseRequestCount
+            applied += handler.preciseAppliedCount
             handler = KeyHandler()
             handler.inputMode = .bopomofo
-            state = InputState.Empty()
+            handler.delegate = delegate
+            delegate.state = InputState.Empty()
+        }
+        func resetRun() {
+            if len > 0 {
+                handler.handle(input: enter, state: delegate.state) { delegate.state = $0 } errorCallback: {}
+            }
+            newHandler()
             len = 0
         }
+        /// One key event as the input method controller handles it.
+        func handleKey(_ input: KeyHandlerInput, failed: inout Bool) {
+            var didFail = false
+            handler.handle(input: input, state: delegate.state) { delegate.state = $0 } errorCallback: { didFail = true }
+            if precise {
+                handler.requestPreciseIfNeeded(composingBuffer: (delegate.state as? InputState.Inputting)?.composingBuffer)
+            }
+            failed = failed || didFail
+        }
 
+        newHandler()
         // Warm-up: one short run, not recorded.
         for syl in syllables.prefix(5) {
-            if let last = type(standardLayoutKeys(forReading: syl), into: handler, from: state).last {
-                state = last
+            var failed = false
+            for key in standardLayoutKeys(forReading: syl).map({ String($0) }) {
+                handleKey(KeyHandlerInput(inputText: key, keyCode: 0, charCode: charCode(key), flags: [], isVerticalMode: false), failed: &failed)
             }
         }
         resetRun()
 
+        // AFM_LATENCY_CRITICAL=1: hold a latency-critical activity (no App
+        // Nap / timer coalescing) for the run (diagnostic).
+        var activity: NSObjectProtocol?
+        if ProcessInfo.processInfo.environment["AFM_LATENCY_CRITICAL"] == "1" {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical], reason: "latency diagnostic")
+        }
+        defer { if let activity { ProcessInfo.processInfo.endActivity(activity) } }
         var runSamples: [(len: Int, ms: Double)] = []
+        var busyCount = 0, busySlow = 0, idleSlow = 0
+        var slowIndices: [Int] = []
+        // AFM_KEY_GAP_MS: untimed pause after every key (typing speed), during
+        // which background results arrive and the heavy model may run.
+        let gapMs = Double(ProcessInfo.processInfo.environment["AFM_KEY_GAP_MS"] ?? "") ?? 0
         while samples.count < targetSamples && cursor < syllables.count {
             let syl = syllables[cursor]
             cursor += 1
@@ -579,11 +820,35 @@ class NeuralSelectorTests: XCTestCase {
             for (i, key) in keys.enumerated() {
                 let input = KeyHandlerInput(inputText: key, keyCode: 0, charCode: charCode(key), flags: [], isVerticalMode: false)
                 let completing = i == keys.count - 1
+                let heavyBusy = precise && AFMPreciseController.shared.isHeavyRunning
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                handler.handle(input: input, state: state) { state = $0 } errorCallback: { failed = true }
+                handleKey(input, failed: &failed)
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
                 if completing && !failed {
                     runSamples.append((len + 1, ms))
+                    if heavyBusy { busyCount += 1; if ms > 10 { busySlow += 1 } } else if ms > 10 { idleSlow += 1 }
+                    if ms > 10 { slowIndices.append(cursor) }
+                    if precise {
+                        payloadSamples.append((len + 1, handler.lastPrecisePayloadMilliseconds))
+                    }
+                }
+                if gapMs > 0 {
+                    if ProcessInfo.processInfo.environment["AFM_GAP_SPIN"] == "1" {
+                        // Diagnostic: busy-wait instead of sleeping.
+                        let end = DispatchTime.now().uptimeNanoseconds + UInt64(gapMs * 1e6)
+                        while DispatchTime.now().uptimeNanoseconds < end {}
+                    } else {
+                        RunLoop.current.run(until: Date().addingTimeInterval(gapMs / 1000))
+                    }
+                }
+                if precise {
+                    // Untimed: let finished background results reach the main
+                    // thread (and be applied) between keystrokes.
+                    let appliedBefore = handler.preciseAppliedCount
+                    RunLoop.current.run(mode: .default, before: Date())
+                    if handler.preciseAppliedCount > appliedBefore {
+                        applySamples.append((len + (completing ? 1 : 0), handler.lastPreciseApplyMilliseconds))
+                    }
                 }
             }
             if failed {
@@ -594,44 +859,34 @@ class NeuralSelectorTests: XCTestCase {
                 continue
             }
             len += 1
+            if precise && len % 7 == 0 {
+                // Untimed pause: the result for the current readings arrives
+                // and is applied, as when the user stops typing.
+                let appliedBefore = handler.preciseAppliedCount
+                let deadline = Date().addingTimeInterval(2)
+                while !AFMPreciseController.shared.isIdle && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.002))
+                }
+                if handler.preciseAppliedCount > appliedBefore {
+                    applySamples.append((len, handler.lastPreciseApplyMilliseconds))
+                }
+            }
             if len >= maxLen {
                 samples.append(contentsOf: runSamples)
                 runSamples.removeAll()
                 resetRun()
             }
         }
-        XCTAssertGreaterThanOrEqual(samples.count, 1500, "not enough samples")
-        XCTAssertEqual(selector.state, .ready, "circuit breaker must not trip")
+        newHandler()
+        XCTAssertGreaterThanOrEqual(samples.count, min(1500, targetSamples), "not enough samples")
+        XCTAssertEqual(selector.state, .ready, "circuit breaker must not trip (R-walk keystrokes before the trip: \(selector.forwardCount))")
         let rssAfter = physFootprintMB()
 
-        func pct(_ v: [Double], _ p: Double) -> Double {
-            guard !v.isEmpty else { return 0 }
-            let s = v.sorted()
-            let idx = max(0, Int(ceil(p / 100.0 * Double(s.count))) - 1)
-            return s[idx]
-        }
-        func stats(_ v: [Double]) -> [String: Any] {
-            [
-                "n": v.count, "p50": pct(v, 50), "p95": pct(v, 95), "p99": pct(v, 99), "max": v.max() ?? 0,
-            ]
-        }
-        let all = samples.map { $0.ms }
-        var buckets: [String: Any] = [:]
-        for (name, range) in [("1-10", 1...10), ("11-20", 11...20), ("21-30", 21...30), ("31-40", 31...40)] {
-            buckets[name] = stats(samples.filter { range.contains($0.len) }.map { $0.ms })
-        }
-        #if DEBUG
-        let config = "Debug"
-        #else
-        let config = "Release"
-        #endif
-        let report: [String: Any] = [
-            "config": config,
+        var extra: [String: Any] = [
+            "precise": precise,
             "samples": samples.count,
             "sentences_pool": sentences,
             "errors": errors,
-            "overall": stats(all),
-            "buckets": buckets,
             "forward_count": selector.forwardCount,
             "neural_walk_count": selector.neuralWalkCount,
             "breaker_state": selector.state == .ready ? "ready" : "NOT_READY(\(selector.state.rawValue))",
@@ -641,8 +896,42 @@ class NeuralSelectorTests: XCTestCase {
             "rss_mb_after_test": rssAfter,
             "rss_delta_mb": rssAfter - rssBefore,
         ]
-        let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
-        print("LATENCY_JSON " + String(decoding: data, as: UTF8.self))
-        XCTAssertLessThan(pct(all, 95), 10.0, "p95 full-keystroke latency must be < 10 ms")
+        if precise {
+            extra["precise_requests"] = requests
+            extra["precise_applied"] = applied
+            extra["precise_payloads"] = selector.precisePayloadCount
+            extra["heavy_calls"] = realQwenThreads == nil ? heavy.calls : Int(AFMPreciseController.shared.scoredCount)
+            extra["heavy"] = realQwenThreads.map {
+                "real_qwen_threads_\($0)" + (ProcessInfo.processInfo.environment["AFM_REAL_QWEN_REAL_GATE"] == "1" ? "_calibrated_tau" : "_tau1")
+                    + "_qos\(ProcessInfo.processInfo.environment["AFM_REAL_QWEN_QOS"] ?? "utility")"
+            } ?? "fake_30ms"
+            extra["precise_load_ms"] = AFMPreciseController.shared.lastLoadMilliseconds
+            extra["precise_state_after"] = AFMPreciseController.shared.state.rawValue
+            extra["precise_delivered"] = AFMPreciseController.shared.deliveredCount
+            extra["precise_timeout_streak"] = AFMPreciseController.shared.timeoutStreak
+            extra["precise_heavy_qos"] = AFMPreciseController.shared.lastHeavyQoSClass.rawValue
+            extra["precise_submitted"] = AFMPreciseController.shared.submittedCount
+            extra["heavy_ms_total"] = AFMPreciseController.shared.totalHeavyMilliseconds
+            extra["heavy_ms_max"] = AFMPreciseController.shared.maxHeavyMilliseconds
+            extra["deferred_starts"] = AFMPreciseController.shared.deferredStartCount
+            extra["start_delay_ms"] = AFMPreciseController.shared.startDelay * 1000
+            extra["key_gap_ms"] = gapMs
+            extra["keys_while_heavy_running"] = busyCount
+            extra["slow_keys_heavy_running"] = busySlow
+            extra["slow_keys_heavy_idle"] = idleSlow
+            extra["apply"] = latencyReport(applySamples).jsonObject
+            extra["payload_ms"] = latencyReport(payloadSamples).jsonObject
+            extra["breaker"] = breaker
+        }
+        extra["slow_syllable_indices"] = Array(slowIndices.prefix(60))
+        extra["slow_count"] = slowIndices.count
+        let report = latencyReport(samples, extra: extra)
+        print("LATENCY_JSON " + report.json)
+        XCTAssertLessThan(report.p95, 10.0, "p95 full-keystroke latency must be < 10 ms")
+        if precise {
+            XCTAssertGreaterThan(requests, 0)
+            XCTAssertGreaterThan(applySamples.count, 0)
+            XCTAssertLessThan(latencyReport(applySamples).p95, 10.0, "p95 apply step must be < 10 ms")
+        }
     }
 }

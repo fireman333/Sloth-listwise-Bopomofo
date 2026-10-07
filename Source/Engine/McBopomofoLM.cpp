@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "UTF8Helper.h"
 #include "gramambular2/reading_grid.h"
 
 namespace McBopomofo {
@@ -162,13 +163,35 @@ McBopomofoLM::getUnigrams(const std::string& key) {
   if (userPhrases_.hasUnigrams(key)) {
     std::vector<Formosa::Gramambular2::LanguageModel::Unigram> rawUserUnigrams =
         userPhrases_.getUnigrams(key);
+    // Flag user phrases so R-walk does not disadvantage them (design D8).
     userUnigrams = filterAndTransformUnigrams(rawUserUnigrams, excludedValues,
-                                              insertedValues);
+                                              insertedValues,
+                                              /*isUserPhrase=*/true);
   }
 
   if (languageModel_.hasUnigrams(key)) {
     std::vector<Formosa::Gramambular2::LanguageModel::Unigram>
         rawGlobalUnigrams = languageModel_.getUnigrams(key);
+    if (!readingPolicyExclusions_.empty()) {
+      // Reading policy applies to built-in entries only, on raw values
+      // (before phrase replacement, macros and the external converter).
+      std::vector<std::string> syllables = AssociatedPhrasesV2::SplitReadings(key);
+      bool keyHasPolicySyllable = false;
+      for (const auto& syllable : syllables) {
+        for (const auto& ex : readingPolicyExclusions_) {
+          keyHasPolicySyllable |= syllable == ex.syllable;
+        }
+      }
+      if (keyHasPolicySyllable) {
+        rawGlobalUnigrams.erase(
+            std::remove_if(
+                rawGlobalUnigrams.begin(), rawGlobalUnigrams.end(),
+                [&](const Formosa::Gramambular2::LanguageModel::Unigram& u) {
+                  return violatesReadingPolicy(syllables, u.value());
+                }),
+            rawGlobalUnigrams.end());
+      }
+    }
     allUnigrams = filterAndTransformUnigrams(rawGlobalUnigrams, excludedValues,
                                              insertedValues);
   }
@@ -209,7 +232,11 @@ McBopomofoLM::getUnigrams(const std::string& key) {
     std::vector<Formosa::Gramambular2::LanguageModel::Unigram>
         rewrittenUserUnigrams;
     for (const auto& unigram : userUnigrams) {
-      rewrittenUserUnigrams.emplace_back(unigram.value(), boostedScore);
+      // Keep the user-phrase flag through the score rewrite (rawValue stays
+      // empty, as upstream).
+      rewrittenUserUnigrams.emplace_back(unigram.value(), boostedScore,
+                                         std::string(),
+                                         unigram.isUserPhrase());
     }
     allUnigrams.insert(allUnigrams.begin(), rewrittenUserUnigrams.begin(),
                        rewrittenUserUnigrams.end());
@@ -247,7 +274,48 @@ std::string McBopomofoLM::getReading(const std::string& value) const {
 std::vector<AssociatedPhrasesV2::Phrase> McBopomofoLM::findAssociatedPhrasesV2(
     const std::string& prefixValue,
     const std::vector<std::string>& prefixReadings) const {
-  return associatedPhrasesV2_.findPhrases(prefixValue, prefixReadings);
+  std::vector<AssociatedPhrasesV2::Phrase> phrases =
+      associatedPhrasesV2_.findPhrases(prefixValue, prefixReadings);
+  if (readingPolicyExclusions_.empty()) {
+    return phrases;
+  }
+  std::vector<AssociatedPhrasesV2::Phrase> kept;
+  kept.reserve(phrases.size());
+  for (const auto& phrase : phrases) {
+    if (!violatesReadingPolicy(phrase.readings, phrase.value)) {
+      kept.push_back(phrase);
+    }
+  }
+  return kept;
+}
+
+void McBopomofoLM::setReadingPolicyExclusions(
+    std::vector<ReadingPolicyExclusion> exclusions) {
+  readingPolicyExclusions_ = std::move(exclusions);
+}
+
+const std::vector<McBopomofoLM::ReadingPolicyExclusion>&
+McBopomofoLM::readingPolicyExclusions() const {
+  return readingPolicyExclusions_;
+}
+
+bool McBopomofoLM::violatesReadingPolicy(
+    const std::vector<std::string>& syllables, const std::string& value) const {
+  if (readingPolicyExclusions_.empty()) {
+    return false;
+  }
+  std::vector<std::string> chars = Split(value);
+  if (chars.size() != syllables.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < chars.size(); ++i) {
+    for (const auto& ex : readingPolicyExclusions_) {
+      if (syllables[i] == ex.syllable && chars[i] == ex.character) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void McBopomofoLM::setPhraseReplacementEnabled(bool enabled) {
@@ -287,7 +355,8 @@ std::vector<Formosa::Gramambular2::LanguageModel::Unigram>
 McBopomofoLM::filterAndTransformUnigrams(
     const std::vector<Formosa::Gramambular2::LanguageModel::Unigram>& unigrams,
     const std::unordered_set<std::string>& excludedValues,
-    std::unordered_set<std::string>& insertedValues) const {
+    std::unordered_set<std::string>& insertedValues,
+    bool isUserPhrase) const {
   std::vector<Formosa::Gramambular2::LanguageModel::Unigram> results;
 
   for (auto&& unigram : unigrams) {
@@ -327,7 +396,8 @@ McBopomofoLM::filterAndTransformUnigrams(
       }
     }
     if (insertedValues.find(value) == insertedValues.end()) {
-      results.emplace_back(value, unigram.score(), rawValue);
+      results.emplace_back(value, unigram.score(), rawValue,
+                           isUserPhrase || unigram.isUserPhrase());
       insertedValues.insert(value);
     }
   }

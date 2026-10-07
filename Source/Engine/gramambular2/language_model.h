@@ -45,18 +45,27 @@ class LanguageModel {
   // usually a log probability from a language model.
   class Unigram {
    public:
+    // isUserPhrase marks a unigram that comes from the user's own phrase
+    // file. It does not affect walk() / walkNBest(); walkWithCharBonus() and
+    // walkNBestWithCharBonus() give such a unigram the best per-position
+    // score instead of its own characters' scores.
     explicit Unigram(std::string val = "", double sc = 0,
-                     std::string rawValue = "")
-        : value_(std::move(val)), score_(sc), rawValue_(std::move(rawValue)) {}
+                     std::string rawValue = "", bool isUserPhrase = false)
+        : value_(std::move(val)),
+          score_(sc),
+          rawValue_(std::move(rawValue)),
+          isUserPhrase_(isUserPhrase) {}
 
     [[nodiscard]] const std::string& value() const { return value_; }
     [[nodiscard]] const std::string& rawValue() const { return rawValue_; }
     [[nodiscard]] double score() const { return score_; }
+    [[nodiscard]] bool isUserPhrase() const { return isUserPhrase_; }
 
    private:
     std::string value_;
     double score_;
     std::string rawValue_;
+    bool isUserPhrase_;
   };
 };
 

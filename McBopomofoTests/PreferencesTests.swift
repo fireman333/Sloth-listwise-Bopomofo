@@ -223,6 +223,81 @@ final class PreferencesTests {
         #expect(Preferences.neuralWalkAlpha == 0)
     }
 
+    @Test("Test reading-policy switch default and override")
+    func testAcceptYanReadingForAi() {
+        #expect(Preferences.acceptYanReadingForAi == false)
+        #expect(Preferences.allKeys.contains("AFMAcceptYanReadingForAi"))
+        Preferences.acceptYanReadingForAi = true
+        #expect(Preferences.acceptYanReadingForAi == true)
+        #expect(Preferences.defaults.bool(forKey: "AFMAcceptYanReadingForAi") == true)
+    }
+
+    @Test("Test precise mode switch default")
+    func testPreciseModeDefault() {
+        #expect(Preferences.preciseModeEnabled == false)
+        #expect(Preferences.allKeys.contains("AFMPreciseModeEnabled"))
+        Preferences.preciseModeEnabled = true
+        #expect(Preferences.defaults.bool(forKey: "AFMPreciseModeEnabled") == true)
+    }
+
+    @Test("Test selection model switches write the defaults domain")
+    @MainActor
+    func testSelectionModelSwitches() {
+        let saved = AFMPreciseController.shared
+        let controller = AFMPreciseController(modelDirectory: nil)
+        AFMPreciseController.shared = controller
+        defer {
+            controller.enabled = false
+            AFMPreciseController.shared = saved
+        }
+        let model = PreferencesViewModel()
+        #expect(model.neuralWalkEnabled == true)
+        #expect(model.preciseModeEnabled == false)
+        #expect(model.acceptYanReadingForAi == false)
+        #expect(model.preciseStatus == .off)
+
+        // The precise switch loads (here: tries to) right away.
+        model.preciseModeEnabled = true
+        #expect(Preferences.defaults.object(forKey: "AFMPreciseModeEnabled") as? Bool == true)
+        #expect(controller.enabled == true)
+        #expect(controller.state == .loading)
+        model.preciseModeEnabled = false
+        #expect(Preferences.defaults.object(forKey: "AFMPreciseModeEnabled") as? Bool == false)
+        #expect(controller.enabled == false)
+        #expect(controller.state == .off)
+
+        model.neuralWalkEnabled = false
+        #expect(Preferences.defaults.object(forKey: "AFMNeuralWalkEnabled") as? Bool == false)
+        #expect(model.neuralStatus == .off)
+        model.acceptYanReadingForAi = true
+        #expect(Preferences.defaults.object(forKey: "AFMAcceptYanReadingForAi") as? Bool == true)
+    }
+
+    @Test("Test selection model status derivation")
+    func testSelectionModelStatus() {
+        #expect(SelectionModelStatus.neural(enabled: false, state: .ready) == .off)
+        #expect(SelectionModelStatus.neural(enabled: true, state: .disabled) == .off)
+        #expect(SelectionModelStatus.neural(enabled: true, state: .loading) == .loading)
+        #expect(SelectionModelStatus.neural(enabled: true, state: .ready) == .ready)
+        #expect(SelectionModelStatus.neural(enabled: true, state: .notFound) == .notFound)
+        #expect(SelectionModelStatus.neural(enabled: true, state: .failed) == .failed)
+        #expect(SelectionModelStatus.neural(enabled: true, state: .tripped) == .tooSlow)
+        #expect(SelectionModelStatus.precise(enabled: false, state: .ready, neuralState: .ready) == .off)
+        #expect(SelectionModelStatus.precise(enabled: true, state: .loading, neuralState: .ready) == .loading)
+        #expect(SelectionModelStatus.precise(enabled: true, state: .ready, neuralState: .ready) == .ready)
+        #expect(SelectionModelStatus.precise(enabled: true, state: .notFound, neuralState: .ready) == .notFound)
+        #expect(SelectionModelStatus.precise(enabled: true, state: .failed, neuralState: .ready) == .failed)
+        #expect(SelectionModelStatus.precise(enabled: true, state: .tripped, neuralState: .ready) == .tooSlow)
+        #expect(SelectionModelStatus.precise(enabled: true, state: .ready, neuralState: .tripped) == .tooSlow)
+    }
+
+    @Test("Test selection model tab is listed")
+    func testSelectionModelTab() {
+        #expect(PreferencesTab.allCases.contains(.selectionModel))
+        #expect(PreferencesTab.selectionModel.imageName == "brain")
+        #expect(kDomainPackTitleKeys.count == 14)
+    }
+
     @Test("Test application support root and model directory paths")
     func testApplicationSupportPaths() {
         // Under XCTest the root is an isolated per-run temp folder.

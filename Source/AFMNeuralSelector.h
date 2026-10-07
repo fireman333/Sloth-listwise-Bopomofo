@@ -16,6 +16,9 @@
 
 #ifdef __cplusplus
 #import "reading_grid.h"
+#include <optional>
+#include <string>
+#include "Rescorer/precise_walk.h"
 #endif
 
 NS_ASSUME_NONNULL_BEGIN
@@ -25,11 +28,26 @@ typedef NS_ENUM(NSInteger, AFMNeuralSelectorState) {
     AFMNeuralSelectorStateDisabled = 0,
     AFMNeuralSelectorStateLoading,
     AFMNeuralSelectorStateReady,
-    /// onnxruntime missing, model directory missing, or load failure. Sticky.
+    /// onnxruntime missing or load failure. Sticky.
     AFMNeuralSelectorStateFailed,
     /// Slow-inference circuit breaker tripped. Sticky for the process.
     AFMNeuralSelectorStateTripped,
+    /// No model directory configured, or it does not exist. Sticky.
+    AFMNeuralSelectorStateNotFound,
 };
+
+/// Posted on the main thread (object: the selector) whenever `state` changes.
+extern NSNotificationName const AFMNeuralSelectorStateDidChangeNotification;
+
+#ifdef __cplusplus
+/// What the end-of-key-event hook needs for a precise-mode request (design D1
+/// steps 1-5): the R N-best that keeps every fixed position, displayed text
+/// first, and the calibrated gate on it.
+struct AFMPrecisePayload {
+    McBopomofo::PreciseCandidateSet candidates;
+    McBopomofo::PreciseDecision gate;
+};
+#endif
 
 /// Readings above this length always use the stock walk (design D10).
 extern const NSUInteger kAFMNeuralMaxSyllables;
@@ -76,12 +94,40 @@ typedef NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable (^AFMNeuralSc
 @property (readonly, nonatomic) NSUInteger forwardCount;
 /// Number of walks that used neural scores (fresh or cached), for tests.
 @property (readonly, nonatomic) NSUInteger neuralWalkCount;
+/// Number of breaker measurements recorded (one per cache-miss walk), for tests.
+@property (readonly, nonatomic) NSUInteger breakerRecordCount;
+/// Test-only: measurements are still counted but never trip the breaker.
+@property (assign, nonatomic) BOOL circuitBreakerDisabledForTesting;
+/// Number of precise payloads computed (N-best + gate), for tests.
+@property (readonly, nonatomic) NSUInteger precisePayloadCount;
+
+/// Records a breaker measurement deferred by
+/// walkGrid:deferBreakerRecording:usedNeural: (at most one is pending),
+/// adding extraMilliseconds (N-best + gate time). No-op if none is pending.
+- (void)flushPendingBreakerRecordingAddingMilliseconds:(double)extraMilliseconds;
 
 #ifdef __cplusplus
 /// Walks the grid for the composing buffer: R-walk when the model is ready,
 /// enabled, alpha != 0, not tripped and the grid holds
 /// 1...kAFMNeuralMaxSyllables readings; the stock walk otherwise.
 - (Formosa::Gramambular2::ReadingGrid::WalkResult)walkGrid:(Formosa::Gramambular2::ReadingGrid &)grid;
+
+/// Same, reporting whether neural scores were used. With deferBreakerRecording
+/// (precise mode ready), a cache-miss measurement is kept pending instead of
+/// recorded, so the end-of-key-event hook can add the N-best and gate time;
+/// a pending measurement is always recorded first by the next walk or hook.
+- (Formosa::Gramambular2::ReadingGrid::WalkResult)walkGrid:(Formosa::Gramambular2::ReadingGrid &)grid
+                                      deferBreakerRecording:(BOOL)deferBreakerRecording
+                                                 usedNeural:(nullable BOOL *)usedNeural;
+
+/// The precise payload for the grid on the cached score table (no forward
+/// pass): N-best (config.k, config.alpha), minus candidates that change a
+/// fixed position, with displayedText moved to rank 0, and the gate. Returns
+/// std::nullopt when R-walk is not usable, the table is not cached, fewer than
+/// two candidates remain, or displayedText is not R's rank 0 (or tied with it).
+- (std::optional<AFMPrecisePayload>)precisePayloadForGrid:(Formosa::Gramambular2::ReadingGrid &)grid
+                                            displayedText:(const std::string &)displayedText
+                                                   config:(const McBopomofo::PreciseConfig &)config;
 #endif
 
 @end

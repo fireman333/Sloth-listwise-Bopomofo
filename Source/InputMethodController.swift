@@ -282,7 +282,26 @@ class McBopomofoInputMethodController: IMKInputController {
                 NSSound.beep()
             }
         }
+        requestPreciseIfNeeded()
         return result
+    }
+
+    /// End-of-key-event hook for precise mode (design D1): at most one
+    /// background request, only while the plain inputting state is shown.
+    func requestPreciseIfNeeded() {
+        keyHandler.requestPreciseIfNeeded(
+            composingBuffer: (state as? InputState.Inputting)?.composingBuffer)
+    }
+
+    /// Whether a precise-mode result for composingBuffer may be applied now
+    /// (design D3): plain inputting state with the same text, active client.
+    static func canApplyPreciseResult(
+        state: InputState, composingBuffer: String, hasClient: Bool
+    ) -> Bool {
+        guard hasClient, let inputting = state as? InputState.Inputting else {
+            return false
+        }
+        return inputting.composingBuffer == composingBuffer
     }
 
     // MARK: - Menu Items

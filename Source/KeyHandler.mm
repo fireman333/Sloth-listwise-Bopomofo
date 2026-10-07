@@ -23,6 +23,7 @@
 
 #import "KeyHandler.h"
 #import "AFMNeuralSelector.h"
+#import "AFMPreciseController.h"
 #import "LanguageModelManager+Privates.h"
 #import "Mandarin.h"
 #import "McBopomofo-Swift.h"
@@ -32,6 +33,8 @@
 #import "reading_grid.h"
 
 #import <algorithm>
+#import <chrono>
+#import <cstdio>
 #import <optional>
 #import <sstream>
 #import <string>
@@ -49,6 +52,24 @@
 InputMode InputModeBopomofo = @"io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo.Bopomofo";
 InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo.PlainBopomofo";
 
+// A precise-mode result shown in place of R-walk while the request key matches.
+struct AFMPreciseOverride {
+    std::string key;
+    Formosa::Gramambular2::ReadingGrid::WalkResult walk;
+};
+
+static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::WalkResult& walk)
+{
+    std::string text;
+    for (const auto& node : walk.nodes) {
+        text += node->value();
+    }
+    return text;
+}
+
+@interface KeyHandler () <AFMPreciseRequester>
+@end
+
 @implementation KeyHandler {
     std::shared_ptr<Formosa::Gramambular2::LanguageModel> _emptySharedPtr;
 
@@ -65,9 +86,27 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
     Formosa::Gramambular2::ReadingGrid::WalkResult _latestWalk;
 
     NSString *_inputMode;
+
+    // Precise mode (design D1 / D3).
+    BOOL _latestWalkUsedNeural;
+    std::optional<AFMPreciseOverride> _preciseOverride;
+    // Key (+ controller epoch) of the most recent request made or result
+    // applied; an identical request is not made again.
+    std::string _lastPreciseKey;
+    NSUInteger _lastPreciseEpoch;
+    BOOL _hasLastPreciseKey;
+    // The outstanding request and its N-best paths (grid nodes stay here).
+    AFMPreciseRequest *_pendingPreciseRequest;
+    std::string _pendingPreciseKey;
+    std::vector<Formosa::Gramambular2::ReadingGrid::WalkResult> _pendingPrecisePaths;
 }
 
 @synthesize delegate = _delegate;
+@synthesize compositionGeneration = _compositionGeneration;
+@synthesize preciseRequestCount = _preciseRequestCount;
+@synthesize preciseAppliedCount = _preciseAppliedCount;
+@synthesize lastPreciseApplyMilliseconds = _lastPreciseApplyMilliseconds;
+@synthesize lastPrecisePayloadMilliseconds = _lastPrecisePayloadMilliseconds;
 
 - (NSString *)inputMode
 {
@@ -94,6 +133,7 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
     if (![_inputMode isEqualToString:newInputMode]) {
         _inputMode = newInputMode;
         _languageModel = newLanguageModel;
+        [self _invalidatePrecise];
 
         if (_grid == nullptr) {
             NSLog(@"warning: _grid used after release");
@@ -168,9 +208,16 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
     }
     _languageModel->setExternalConverterEnabled(Preferences.chineseConversionStyle == ChineseConversionStyleModel);
 
+    // Reading policy (AFMAcceptYanReadingForAi) for both language models.
+    [LanguageModelManager applyReadingPolicyAcceptingYanReadingForAi:Preferences.acceptYanReadingForAi];
+
     // Picks up AFMNeuralWalkEnabled / AFMNeuralWalkAlpha and starts loading the
     // R model in the background if it was switched on. Never blocks.
     [AFMNeuralSelector.sharedSelector syncWithPreferences];
+
+    // AFMPreciseModeEnabled: starts loading or releases the heavy model in the
+    // background. Same value as before: no-op.
+    [AFMPreciseController.sharedController syncWithPreferences];
 }
 
 - (void)fixNodeWithReading:(NSString *)reading value:(NSString *)value originalCursorIndex:(size_t)originalCursorIndex useMoveCursorAfterSelectionSetting:(BOOL)flag
@@ -305,6 +352,7 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
     _bpmfReadingBuffer->clear();
     _grid->clear();
     _latestWalk = Formosa::Gramambular2::ReadingGrid::WalkResult {};
+    [self _invalidatePrecise];
 }
 
 - (void)handleForceCommitWithStateCallback:(void (^)(InputState *))stateCallback
@@ -1568,6 +1616,7 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
                     }
                     [strongSelf.delegate keyHandler:strongSelf didRequestBoostScoreForPhrase:candidate.value reading:reading];
                     [strongSelf.delegate keyHandlerDidRequestReloadLanguageModel:strongSelf];
+                    [strongSelf _invalidatePrecise];
                     [strongSelf _walk];
                     InputStateInputting *inputting = (InputStateInputting *)[strongSelf buildInputtingState];
                     stateCallback(inputting);
@@ -1583,6 +1632,7 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
                     }
                     [strongSelf.delegate keyHandler:strongSelf didRequestExcludePhrase:candidate.value reading:reading];
                     [strongSelf.delegate keyHandlerDidRequestReloadLanguageModel:strongSelf];
+                    [strongSelf _invalidatePrecise];
                     [strongSelf _walk];
                     InputStateInputting *inputting = (InputStateInputting *)[strongSelf buildInputtingState];
                     stateCallback(inputting);
@@ -2540,14 +2590,171 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
 
 - (void)_walk
 {
-    // R-walk only in Bopomofo mode; the selector itself falls back to the
-    // stock walk when the model is not usable (switch off, not loaded,
-    // failed, tripped, over the neural length limit). See AFMNeuralSelector.
-    _latestWalk = _inputMode == InputModeBopomofo ? [AFMNeuralSelector.sharedSelector walkGrid:*_grid] : _grid->walk();
+    _latestWalkUsedNeural = NO;
+    if (_inputMode != InputModeBopomofo) {
+        _preciseOverride.reset();
+        _latestWalk = _grid->walk();
+        return;
+    }
+    // An applied precise result stands only while nothing it depends on
+    // changed; it is never written into the grid or the user override model.
+    if (_preciseOverride.has_value()) {
+        if (_preciseOverride->key == [self _preciseRequestKey]) {
+            _latestWalk = _preciseOverride->walk;
+            _latestWalkUsedNeural = YES;
+            return;
+        }
+        _preciseOverride.reset();
+    }
+    // R-walk; the selector itself falls back to the stock walk when the model
+    // is not usable (switch off, not loaded, failed, tripped, over the neural
+    // length limit). See AFMNeuralSelector. While precise mode is ready, the
+    // breaker measurement waits for the end-of-key-event hook.
+    BOOL usedNeural = NO;
+    _latestWalk = [AFMNeuralSelector.sharedSelector walkGrid:*_grid
+                                       deferBreakerRecording:AFMPreciseController.sharedController.isReady
+                                                  usedNeural:&usedNeural];
+    _latestWalkUsedNeural = usedNeural;
+}
+
+#pragma mark - Precise mode
+
+- (BOOL)showingPreciseResult
+{
+    return _preciseOverride.has_value();
+}
+
+- (void)rewalkForTesting
+{
+    [self _walk];
+}
+
+/// Discards any applied precise result and outstanding request.
+- (void)_invalidatePrecise
+{
+    ++_compositionGeneration;
+    _preciseOverride.reset();
+    _pendingPreciseRequest = nil;
+    _pendingPreciseKey.clear();
+    _pendingPrecisePaths.clear();
+}
+
+/// Readings, characters per position, fixed positions, composition and
+/// language-model generations (design D3). No composing text.
+- (std::string)_preciseRequestKey
+{
+    std::string key;
+    for (const auto& reading : _grid->readings()) {
+        key += reading;
+        key += '\x1f';
+    }
+    key += '\x1d';
+    for (const auto& position : _grid->charsAtPositions()) {
+        for (const auto& c : position) {
+            key += c;
+            key += '\x1f';
+        }
+        key += '\x1e';
+    }
+    key += '\x1d';
+    const auto& spans = _grid->spans();
+    char number[64];
+    for (size_t location = 0; location < spans.size(); ++location) {
+        for (size_t length = 1; length <= spans[location].maxLength(); ++length) {
+            const auto& node = spans[location].nodeOf(length);
+            if (node != nullptr && node->isOverridden()) {
+                snprintf(number, sizeof(number), "%zu:%zu:%.17g:", location, node->spanningLength(), node->score());
+                key += number;
+                key += node->value();
+                key += '\x1f';
+            }
+        }
+    }
+    snprintf(number, sizeof(number), "\x1d%lu:%lu", (unsigned long)_compositionGeneration, (unsigned long)LanguageModelManager.reloadGeneration);
+    key += number;
+    return key;
+}
+
+- (void)requestPreciseIfNeededForComposingBuffer:(NSString *)composingBuffer
+{
+    AFMNeuralSelector *selector = AFMNeuralSelector.sharedSelector;
+    AFMPreciseController *controller = AFMPreciseController.sharedController;
+    // Once per key event (both IMC hooks): background inference waits for a
+    // typing pause (design D2 addendum).
+    [controller noteKeyEvent];
+    // Precise mode not ready (or not applicable): no enumeration, no gate; a
+    // measurement deferred by this key event's walk is recorded as is.
+    if (composingBuffer == nil || _inputMode != InputModeBopomofo || !controller.isReady || !_latestWalkUsedNeural || _preciseOverride.has_value() || _grid->length() == 0) {
+        [selector flushPendingBreakerRecordingAddingMilliseconds:0];
+        return;
+    }
+    std::string key = [self _preciseRequestKey];
+    if (_hasLastPreciseKey && _lastPreciseEpoch == controller.epoch && _lastPreciseKey == key) {
+        [selector flushPendingBreakerRecordingAddingMilliseconds:0];
+        return;
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto payload = [selector precisePayloadForGrid:*_grid displayedText:AFMJoinedValues(_latestWalk) config:controller.config];
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    _lastPrecisePayloadMilliseconds = ms;
+    [selector flushPendingBreakerRecordingAddingMilliseconds:ms];
+
+    // The outcome for this key is deterministic; do not evaluate it again.
+    _hasLastPreciseKey = YES;
+    _lastPreciseKey = key;
+    _lastPreciseEpoch = controller.epoch;
+    if (selector.state != AFMNeuralSelectorStateReady || !payload.has_value() || !payload->gate.gateOpen) {
+        return;  // Breaker tripped by this measurement, or R confident.
+    }
+
+    AFMPreciseRequest *request = [[AFMPreciseRequest alloc] initWithReadings:_grid->readings()
+                                                                  candidates:payload->candidates.texts
+                                                                     rScores:payload->candidates.rScores
+                                                                         key:@(key.c_str())
+                                                               composingText:composingBuffer
+                                                                   requester:self];
+    _pendingPreciseRequest = request;
+    _pendingPreciseKey = key;
+    _pendingPrecisePaths = std::move(payload->candidates.paths);
+    ++_preciseRequestCount;
+    [controller submitRequest:request];
+}
+
+- (void)preciseRequestDidFinish:(AFMPreciseRequest *)request chosenIndex:(NSUInteger)chosenIndex
+{
+    auto t0 = std::chrono::steady_clock::now();
+    if (request != _pendingPreciseRequest || _inputMode != InputModeBopomofo || chosenIndex >= _pendingPrecisePaths.size()) {
+        return;
+    }
+    if (request.epoch != AFMPreciseController.sharedController.epoch || [self _preciseRequestKey] != _pendingPreciseKey) {
+        return;  // Readings, characters, fixed positions or generations changed.
+    }
+    Formosa::Gramambular2::ReadingGrid::WalkResult chosen = _pendingPrecisePaths[chosenIndex];
+    if (!McBopomofo::KeepsFixedPositions(chosen, McBopomofo::FixedPositionsOf(*_grid)) || AFMJoinedValues(chosen) == AFMJoinedValues(_latestWalk)) {
+        return;
+    }
+    id<KeyHandlerDelegate> delegate = self.delegate;
+    if (![delegate respondsToSelector:@selector(keyHandler:canApplyPreciseResultForComposingBuffer:)] || ![delegate respondsToSelector:@selector(keyHandler:didUpdatePreciseState:)] || ![delegate keyHandler:self canApplyPreciseResultForComposingBuffer:request.composingText]) {
+        return;
+    }
+    std::string key = _pendingPreciseKey;
+    _pendingPreciseRequest = nil;
+    _pendingPreciseKey.clear();
+    _pendingPrecisePaths.clear();
+    _preciseOverride = AFMPreciseOverride { key, std::move(chosen) };
+    [self _walk];  // Returns the override: no inference.
+    _hasLastPreciseKey = YES;
+    _lastPreciseKey = key;
+    _lastPreciseEpoch = request.epoch;
+    ++_preciseAppliedCount;
+    [delegate keyHandler:self didUpdatePreciseState:[self buildInputtingState]];
+    _lastPreciseApplyMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 - (InputStateChoosingCandidate *)_buildCandidateStateFromInputtingState:(InputStateInputting *)inputting useVerticalMode:(BOOL)useVerticalMode
 {
+    ++_compositionGeneration;
     auto candidates = _grid->candidatesAt(self.actualCandidateCursorIndex);
 
     std::unordered_map<std::string, size_t> valueCountMap;

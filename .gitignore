@@ -26,3 +26,4 @@ build-walk/
 build-release/
 build-selection*/
 *.profraw
+build-llama/

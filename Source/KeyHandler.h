@@ -41,6 +41,13 @@ extern InputMode InputModePlainBopomofo;
 - (BOOL)keyHandler:(KeyHandler *)keyHandler didRequestBoostScoreForPhrase:(NSString *)phrase reading:(NSString *)reading;
 - (BOOL)keyHandler:(KeyHandler *)keyHandler didRequestExcludePhrase:(NSString *)phrase reading:(NSString *)reading;
 - (BOOL)keyHandlerDidRequestReloadLanguageModel:(KeyHandler *)keyHandler;
+@optional
+/// Precise mode (design D3): whether a background result may replace the
+/// composing buffer, i.e. the current state is still the plain inputting
+/// state showing composingBuffer and the client is still active.
+- (BOOL)keyHandler:(KeyHandler *)keyHandler canApplyPreciseResultForComposingBuffer:(NSString *)composingBuffer;
+/// Precise mode: the inputting state after a background result was applied.
+- (void)keyHandler:(KeyHandler *)keyHandler didUpdatePreciseState:(InputState *)state;
 @end
 
 @interface BuildAssociatedPhraseParams: NSObject
@@ -78,6 +85,13 @@ extern InputMode InputModePlainBopomofo;
                          associatedPhraseValue:(NSString *)phraseValue;
 - (void)clear;
 
+/// End-of-key-event hook for precise mode (design D1). Call once after each
+/// key event and after a candidate pick; pass the composing buffer if the
+/// resulting state is InputState.Inputting, nil otherwise. Makes at most one
+/// background re-ranking request; never blocks.
+- (void)requestPreciseIfNeededForComposingBuffer:(nullable NSString *)composingBuffer
+    NS_SWIFT_NAME(requestPreciseIfNeeded(composingBuffer:));
+
 - (void)handleForceCommitWithStateCallback:(void (^)(InputState *))stateCallback
     NS_SWIFT_NAME(handleForceCommit(stateCallback:));
 
@@ -96,6 +110,20 @@ extern InputMode InputModePlainBopomofo;
 @property (weak, nonatomic) id<KeyHandlerDelegate> delegate;
 @property (assign, nonatomic, readonly) NSInteger actualCandidateCursorIndex;
 @property (assign, nonatomic, readonly) NSInteger cursorIndex;
+/// Bumped on commit, clear, input-mode switch, candidate window, boost /
+/// exclude: a precise result requested before it is never applied.
+@property (assign, nonatomic, readonly) NSUInteger compositionGeneration;
+/// Precise-mode counters and state, for tests.
+@property (assign, nonatomic, readonly) NSUInteger preciseRequestCount;
+@property (assign, nonatomic, readonly) NSUInteger preciseAppliedCount;
+@property (assign, nonatomic, readonly) BOOL showingPreciseResult;
+/// Wall time of the last applied precise result on the key-handling thread
+/// (checks, re-walk, inputting state, delegate update), in ms.
+@property (assign, nonatomic, readonly) double lastPreciseApplyMilliseconds;
+/// Wall time of the last N-best + gate computation in the hook, in ms (tests).
+@property (assign, nonatomic, readonly) double lastPrecisePayloadMilliseconds;
+/// Test-only: re-evaluates the composing buffer without any change.
+- (void)rewalkForTesting;
 @end
 
 NS_ASSUME_NONNULL_END

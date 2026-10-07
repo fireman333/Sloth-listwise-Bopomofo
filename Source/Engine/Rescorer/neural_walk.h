@@ -161,7 +161,10 @@ class NeuralScoreCache {
 // the streak. Time is fed in, so tests need no clock.
 class NeuralCircuitBreaker {
  public:
-  static constexpr double kThresholdMs = 10.0;
+  // 30 ms (design D9): R is 3-5x slower after the CPU idles between keys,
+  // so 10 ms tripped under normal typing rhythm. The 10 ms p95 budget is
+  // unchanged (measured on continuous typing).
+  static constexpr double kThresholdMs = 30.0;
   static constexpr int kConsecutive = 3;
 
   void record(double ms) {

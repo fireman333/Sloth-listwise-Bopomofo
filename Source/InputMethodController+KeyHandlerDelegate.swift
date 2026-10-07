@@ -124,4 +124,19 @@ extension McBopomofoInputMethodController: KeyHandlerDelegate {
         return true
     }
 
+    func keyHandler(
+        _ keyHandler: KeyHandler, canApplyPreciseResultForComposingBuffer composingBuffer: String
+    ) -> Bool {
+        keyHandler === self.keyHandler
+            && McBopomofoInputMethodController.canApplyPreciseResult(
+                state: state, composingBuffer: composingBuffer, hasClient: currentClient != nil)
+    }
+
+    func keyHandler(_ keyHandler: KeyHandler, didUpdatePreciseState state: InputState) {
+        guard keyHandler === self.keyHandler, let client = currentClient else {
+            return
+        }
+        handle(state: state, client: client)
+    }
+
 }

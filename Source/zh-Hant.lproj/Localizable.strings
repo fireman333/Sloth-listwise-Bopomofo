@@ -258,3 +258,36 @@
 "You can run a script to use git to backup your phrases. The script will run in the folder of your user phrases folder." = "您可以在加詞之後，透過這個 Shell Script 執行指定的工作，像是使用 git 備份詞庫。這個 script 會在你的使用者詞彙資料夾下執行。";
 
 "Quick Text Transform" = "日韓多語拼音轉換";
+
+/* Selection model tab (precise-mode-and-preferences) */
+"Selection Model" = "選字模型";
+"Neural Selection:" = "神經選字：";
+"Choose characters with the neural model" = "以神經模型選字";
+"Precise Mode:" = "精準模式：";
+"Re-rank uncertain results in the background" = "在背景重新評估信心較低的選字";
+"Precise mode uses about 1 GB of memory while it is on. Its model is installed separately." = "精準模式開啟時約需 1 GB 記憶體；模型需另外安裝。";
+"Reading of 癌:" = "「癌」的讀音：";
+"Also accept ㄧㄢˊ (default: ㄞˊ only)" = "也接受 ㄧㄢˊ（預設只接受 ㄞˊ）";
+"These settings take effect the next time you switch to this input method; precise mode starts loading right away." = "以上設定在下次切換到本輸入法時生效；精準模式會立即開始載入。";
+"Domain Packs:" = "領域包：";
+"Not yet available" = "尚未提供";
+"Status: %@" = "狀態：%@";
+"Loading" = "載入中";
+"Ready" = "可用";
+"Model not found" = "找不到模型";
+"Failed to load" = "載入失敗";
+"Stopped (too slow)" = "速度過慢，已停用";
+"Industry" = "工業";
+"Traditional Chinese Medicine" = "中醫";
+"Biology" = "生物學";
+"Western Medicine" = "西醫";
+"Buddhism" = "佛教";
+"Law and Politics" = "法律與政治";
+"Physics and Chemistry" = "物理學與化學";
+"Architecture" = "建築";
+"Military" = "軍事";
+"Business" = "商業";
+"Education" = "教育";
+"Telecommunications" = "通訊";
+"Sports" = "運動";
+"Computers" = "電腦";

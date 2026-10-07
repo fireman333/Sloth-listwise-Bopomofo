@@ -37,6 +37,9 @@ static McBopomofo::McBopomofoLM gLanguageModelMcBopomofo;
 static McBopomofo::McBopomofoLM gLanguageModelPlainBopomofo;
 static McBopomofo::UserOverrideModel gUserOverrideModel(kUserOverrideModelCapacity, kObservedOverrideHalflife);
 static McBopomofo::VariantAnnotator gVariantAnnotator;
+static NSUInteger gReloadGeneration = 0;
+// Backing store for loadUserPhrasesForTesting: (the LM keeps views into it).
+static std::string gTestingUserPhrases;
 
 static NSString *const kUserDataTemplateName = @"template-data";
 static NSString *const kUserDataPlainBopomofoTemplateName = @"template-data-plain-bpmf";
@@ -49,6 +52,7 @@ static NSString *const kTemplateExtension = @".txt";
 
 static void LTLoadLanguageModelFile(NSString *filenameWithoutExtension, McBopomofo::McBopomofoLM& lm)
 {
+    ++gReloadGeneration;
     Class cls = NSClassFromString(@"McBopomofoInputMethodController");
     NSString *dataPath = [[NSBundle bundleForClass:cls] pathForResource:filenameWithoutExtension ofType:@"txt"];
     lm.loadLanguageModel(dataPath.UTF8String);
@@ -56,6 +60,7 @@ static void LTLoadLanguageModelFile(NSString *filenameWithoutExtension, McBopomo
 
 static void LTLoadAssociatedPhrases(McBopomofo::McBopomofoLM& lm)
 {
+    ++gReloadGeneration;
     Class cls = NSClassFromString(@"McBopomofoInputMethodController");
     NSString *dataPath = [[NSBundle bundleForClass:cls] pathForResource:@"associated-phrases-v2" ofType:@"txt"];
     lm.loadAssociatedPhrasesV2(dataPath.UTF8String);
@@ -92,6 +97,46 @@ static void LTLoadVariantAnnotatorData()
 {
     gLanguageModelMcBopomofo.loadUserPhrases("", static_cast<size_t>(0));
     gLanguageModelMcBopomofo.loadExcludedPhrases("", static_cast<size_t>(0));
+    ++gReloadGeneration;
+}
+
++ (void)loadUserPhrasesForTesting:(NSString *)content
+{
+    gTestingUserPhrases = content.UTF8String;
+    gLanguageModelMcBopomofo.loadUserPhrases(gTestingUserPhrases.data(), gTestingUserPhrases.size());
+    gLanguageModelMcBopomofo.loadExcludedPhrases("", static_cast<size_t>(0));
+    ++gReloadGeneration;
+}
+
++ (NSUInteger)reloadGeneration
+{
+    return gReloadGeneration;
+}
+
++ (void)applyReadingPolicyAcceptingYanReadingForAi:(BOOL)accept
+{
+    std::vector<McBopomofo::McBopomofoLM::ReadingPolicyExclusion> exclusions;
+    if (!accept) {
+        exclusions.push_back({ "ㄧㄢˊ", "癌" });
+    }
+    auto same = [&](const McBopomofo::McBopomofoLM& lm) {
+        const auto& current = lm.readingPolicyExclusions();
+        if (current.size() != exclusions.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < current.size(); ++i) {
+            if (current[i].syllable != exclusions[i].syllable || current[i].character != exclusions[i].character) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (same(gLanguageModelMcBopomofo) && same(gLanguageModelPlainBopomofo)) {
+        return;
+    }
+    gLanguageModelMcBopomofo.setReadingPolicyExclusions(exclusions);
+    gLanguageModelPlainBopomofo.setReadingPolicyExclusions(exclusions);
+    ++gReloadGeneration;
 }
 
 + (void)loadDataModels
@@ -146,11 +191,13 @@ static void LTLoadVariantAnnotatorData()
     gLanguageModelMcBopomofo.loadUserPhrases([self userPhrasesDataPathMcBopomofo].UTF8String, [self excludedPhrasesDataPathMcBopomofo].UTF8String);
     gLanguageModelPlainBopomofo.loadUserPhrases(userPhraseForPlainBopomofo ? [self userPhrasesDataPathPlainBopomofo].UTF8String : NULL,
         [self excludedPhrasesDataPathPlainBopomofo].UTF8String);
+    ++gReloadGeneration;
 }
 
 + (void)loadUserPhraseReplacement
 {
     gLanguageModelMcBopomofo.loadPhraseReplacementMap([self phraseReplacementDataPathMcBopomofo].UTF8String);
+    ++gReloadGeneration;
 }
 
 + (void)setupDataModelValueConverter
@@ -489,6 +536,7 @@ static void LTLoadVariantAnnotatorData()
 + (void)setPhraseReplacementEnabled:(BOOL)phraseReplacementEnabled
 {
     gLanguageModelMcBopomofo.setPhraseReplacementEnabled(phraseReplacementEnabled);
+    ++gReloadGeneration;
 }
 
 + (nullable NSString *)readingFor:(NSString *)phrase

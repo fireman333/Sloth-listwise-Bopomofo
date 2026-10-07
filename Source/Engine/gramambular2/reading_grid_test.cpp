@@ -27,12 +27,14 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "language_model.h"
+#include "nbest_reference_for_test.h"
 
 namespace Formosa::Gramambular2 {
 
@@ -1271,4 +1273,348 @@ TEST(ReadingGridTest, NBestCharBonusKeepsOverride) {
   EXPECT_DOUBLE_EQ(nb[0].score, ReadingGrid::Node::kOverridingScore);
 }
 
+// Optimized walkNBestImpl vs the original algorithm (test-only reference in
+// nbest_reference_for_test.h): results must be exactly equal (texts, scores,
+// order incl. seq tie-breaks, shared-vs-copied nodes and chosen unigrams).
+
+static void ExpectNBestEqualsReference(ReadingGrid& grid, size_t k,
+                                       double alpha,
+                                       const ReadingGrid::PositionalCharScores*
+                                           scores,
+                                       const std::string& label) {
+  auto got = scores == nullptr ? grid.walkNBest(k)
+                               : grid.walkNBestWithCharBonus(k, alpha, *scores);
+  auto want = NBestReference::WalkNBestReference(grid, k, alpha, scores);
+  EXPECT_EQ(NBestReference::DiffNBest(got, want, &grid), "")
+      << label << " k=" << k << " alpha=" << alpha;
+}
+
+static ReadingGrid::PositionalCharScores RandomCharScores(
+    const ReadingGrid& grid, std::mt19937* rng, bool discrete) {
+  ReadingGrid::PositionalCharScores scores;
+  scores.table.resize(grid.length());
+  const auto chars = grid.charsAtPositions();
+  std::uniform_real_distribution<double> real(-12.0, 0.0);
+  std::uniform_int_distribution<int> step(0, 6);
+  std::bernoulli_distribution keep(0.8);
+  for (size_t t = 0; t < chars.size(); ++t) {
+    for (const auto& c : chars[t]) {
+      if (keep(*rng)) {
+        scores.table[t][c] = discrete ? -0.5 * step(*rng) : real(*rng);
+      }
+    }
+  }
+  return scores;
+}
+
+TEST(ReadingGridTest, NBestEqualsReferenceOnFixtures) {
+  std::mt19937 rng(20261007);
+  for (int variant = 0; variant < 4; ++variant) {
+    ReadingGrid grid = MakeNBestGrid();
+    if (variant == 1) {
+      ASSERT_TRUE(grid.overrideCandidate(1, "刻"));
+    } else if (variant == 2) {
+      ASSERT_TRUE(grid.overrideCandidate(
+          7, "中", ReadingGrid::Node::OverrideType::
+                       kOverrideValueWithScoreFromTopUnigram));
+    } else if (variant == 3) {
+      ASSERT_TRUE(grid.overrideCandidate(4, "司"));
+      ASSERT_TRUE(grid.overrideCandidate(0, "高科技"));
+    }
+    for (size_t k : {1, 2, 3, 5, 10, 100}) {
+      ExpectNBestEqualsReference(grid, k, 0.0, nullptr, "fixture");
+      for (double alpha : {0.0, 0.5, 3.0}) {
+        for (bool discrete : {false, true}) {
+          auto scores = RandomCharScores(grid, &rng, discrete);
+          ExpectNBestEqualsReference(grid, k, alpha, &scores, "fixture+bonus");
+        }
+      }
+    }
+  }
+}
+
+// An LM with many ties (scores from a small discrete set), duplicate values
+// within a reading, and multi-syllable phrases, to stress tie-breaking and
+// the duplicate-value handling of the option pruning.
+class RandomTieLM : public LanguageModel {
+ public:
+  explicit RandomTieLM(std::mt19937* rng) {
+    const std::vector<std::string> syllables{"a", "b", "c", "d", "e"};
+    const std::vector<std::string> pool{"甲", "乙", "丙", "丁", "戊", "己",
+                                        "庚", "辛", "壬", "癸", "子", "丑"};
+    std::uniform_int_distribution<size_t> pick(0, pool.size() - 1);
+    std::uniform_int_distribution<int> count(1, 25);
+    std::uniform_int_distribution<int> step(0, 8);
+    auto score = [&]() { return -1.0 - 0.1 * step(*rng); };
+    for (const auto& s : syllables) {
+      int n = count(*rng);
+      for (int j = 0; j < n; ++j) {
+        db_[s].emplace_back(pool[pick(*rng)], score());  // may duplicate
+      }
+    }
+    std::bernoulli_distribution has(0.35);
+    for (const auto& a : syllables) {
+      for (const auto& b : syllables) {
+        if (has(*rng)) {
+          int n = count(*rng) / 5 + 1;
+          for (int j = 0; j < n; ++j) {
+            db_[a + "-" + b].emplace_back(pool[pick(*rng)] + pool[pick(*rng)],
+                                          score() - 1.0);
+          }
+        }
+        for (const auto& c : syllables) {
+          if (has(*rng) && has(*rng)) {
+            db_[a + "-" + b + "-" + c].emplace_back(
+                pool[pick(*rng)] + pool[pick(*rng)] + pool[pick(*rng)],
+                score() - 2.0);
+          }
+        }
+      }
+    }
+  }
+  // Re-flags a random subset of unigrams as user phrases (design D8). Only
+  // consumes rng when called, so the plain constructor's grids are unchanged.
+  void flagRandomUserPhrases(std::mt19937* rng, double rate) {
+    std::bernoulli_distribution flag(rate);
+    for (auto& [key, unigrams] : db_) {
+      for (auto& u : unigrams) {
+        if (flag(*rng)) {
+          u = Unigram(u.value(), u.score(), u.rawValue(), true);
+        }
+      }
+    }
+  }
+  std::vector<Unigram> getUnigrams(const std::string& key) override {
+    const auto f = db_.find(key);
+    return f == db_.end() ? std::vector<Unigram>() : f->second;
+  }
+  bool hasUnigrams(const std::string& key) override {
+    return db_.find(key) != db_.end();
+  }
+
+ private:
+  std::map<std::string, std::vector<Unigram>> db_;
+};
+
+TEST(ReadingGridTest, NBestEqualsReferenceOnRandomTieGrids) {
+  std::mt19937 rng(42);
+  const std::vector<std::string> syllables{"a", "b", "c", "d", "e"};
+  std::uniform_int_distribution<size_t> pickSyl(0, syllables.size() - 1);
+  std::uniform_int_distribution<int> len(1, 14);
+  std::bernoulli_distribution doOverride(0.3);
+  size_t comparisons = 0;
+  for (int g = 0; g < 300; ++g) {
+    ReadingGrid grid(std::make_shared<RandomTieLM>(&rng));
+    const int n = len(rng);
+    for (int j = 0; j < n; ++j) {
+      grid.insertReading(syllables[pickSyl(rng)]);
+    }
+    if (doOverride(rng) && grid.length() > 0) {
+      std::uniform_int_distribution<size_t> loc(0, grid.length() - 1);
+      size_t at = loc(rng);
+      auto cands = grid.candidatesAt(at);
+      if (!cands.empty()) {
+        std::uniform_int_distribution<size_t> pc(0, cands.size() - 1);
+        grid.overrideCandidate(
+            at, cands[pc(rng)],
+            g % 2 ? ReadingGrid::Node::OverrideType::kOverrideValueWithHighScore
+                  : ReadingGrid::Node::OverrideType::
+                        kOverrideValueWithScoreFromTopUnigram);
+      }
+    }
+    for (size_t k : {1, 2, 3, 10}) {
+      ExpectNBestEqualsReference(grid, k, 0.0, nullptr,
+                                 "random grid " + std::to_string(g));
+      ++comparisons;
+      for (double alpha : {0.5, 1.0}) {
+        auto scores = RandomCharScores(grid, &rng, /*discrete=*/true);
+        ExpectNBestEqualsReference(grid, k, alpha, &scores,
+                                   "random grid " + std::to_string(g));
+        ++comparisons;
+      }
+    }
+  }
+  EXPECT_EQ(comparisons, 300u * 4u * 3u);
+}
+
+
+// ---- User phrases under the char bonus (design D8) ----
+
+TEST(ReadingGridTest, UnigramUserPhraseFlagDefaultsToFalse) {
+  EXPECT_FALSE(LanguageModel::Unigram().isUserPhrase());
+  EXPECT_FALSE(LanguageModel::Unigram("a", -1).isUserPhrase());
+  EXPECT_FALSE(LanguageModel::Unigram("a", -1, "b").isUserPhrase());
+  LanguageModel::Unigram u("a", -1, "b", true);
+  EXPECT_TRUE(u.isUserPhrase());
+  EXPECT_EQ(u.value(), "a");
+  EXPECT_EQ(u.rawValue(), "b");
+  EXPECT_DOUBLE_EQ(u.score(), -1);
+  LanguageModel::Unigram copy = u;
+  EXPECT_TRUE(copy.isUserPhrase());
+}
+
+// Fixed in-memory LM: reading -> unigrams (flags as given).
+class FixedLM : public LanguageModel {
+ public:
+  explicit FixedLM(std::map<std::string, std::vector<Unigram>> db)
+      : db_(std::move(db)) {}
+  std::vector<Unigram> getUnigrams(const std::string& key) override {
+    const auto f = db_.find(key);
+    return f == db_.end() ? std::vector<Unigram>() : f->second;
+  }
+  bool hasUnigrams(const std::string& key) override {
+    return db_.find(key) != db_.end();
+  }
+
+ private:
+  std::map<std::string, std::vector<Unigram>> db_;
+};
+
+// 錏錒 ㄧㄚˋ-ㄚ (the real-install case): a user phrase of rare characters.
+static std::shared_ptr<FixedLM> MakeRareUserPhraseLM(bool flagged) {
+  using U = LanguageModel::Unigram;
+  return std::make_shared<FixedLM>(std::map<std::string, std::vector<U>>{
+      {"ㄧㄚˋ", {U("亞", -3.5), U("訝", -5.0)}},
+      {"ㄚ", {U("啊", -3.0), U("阿", -3.2)}},
+      {"ㄧㄚˋ-ㄚ", {U("錏錒", 0, "", flagged)}},
+  });
+}
+
+static ReadingGrid::PositionalCharScores RareCharScores() {
+  ReadingGrid::PositionalCharScores s;
+  s.table.resize(2);
+  s.table[0] = {{"亞", -0.1}, {"訝", -6.0}, {"錏", -14.0}};
+  s.table[1] = {{"啊", -0.1}, {"阿", -2.0}, {"錒", -16.0}};
+  return s;
+}
+
+TEST(ReadingGridTest, CharBonusFlaggedRareUserPhraseWinsWhereStockPicksIt) {
+  for (bool flagged : {false, true}) {
+    ReadingGrid grid(MakeRareUserPhraseLM(flagged));
+    grid.insertReading("ㄧㄚˋ");
+    grid.insertReading("ㄚ");
+    ASSERT_EQ(Joined(grid.walk()), "錏錒");  // stock picks the user phrase
+    const auto scores = RareCharScores();
+    auto r = grid.walkWithCharBonus(0.5, scores);
+    auto nb = grid.walkNBestWithCharBonus(5, 0.5, scores);
+    ASSERT_FALSE(nb.empty());
+    if (!flagged) {
+      // Without the flag (pre-D8) the rare chars' log p override the phrase.
+      EXPECT_EQ(Joined(r), "亞啊");
+      EXPECT_EQ(Joined(nb[0]), "亞啊");
+    } else {
+      EXPECT_EQ(Joined(r), "錏錒");
+      // Bonus = alpha * (row max at 0 + row max at 1).
+      EXPECT_NEAR(r.score, 0 + 0.5 * (-0.1 + -0.1), 1e-12);
+      EXPECT_EQ(Joined(nb[0]), "錏錒");
+      EXPECT_NEAR(nb[0].score, r.score, 1e-12);
+    }
+    auto want = NBestReference::WalkNBestReference(grid, 5, 0.5, &scores);
+    EXPECT_EQ(NBestReference::DiffNBest(nb, want, &grid), "") << flagged;
+  }
+}
+
+TEST(ReadingGridTest, CharBonusFlaggedUnigramGetsRowMaxPerPosition) {
+  using U = LanguageModel::Unigram;
+  // Three positions; the flagged 3-char phrase covers all of them. Row 1 is
+  // empty (-> missingScore), and the phrase's own chars are absent from the
+  // table (an unflagged copy would get 3 * missingScore).
+  for (bool flagged : {false, true}) {
+    ReadingGrid grid(std::make_shared<FixedLM>(std::map<std::string, std::vector<U>>{
+        {"a", {U("甲", -50)}},
+        {"b", {U("乙", -50)}},
+        {"c", {U("丙", -50)}},
+        {"a-b-c", {U("子丑寅", -1, "", flagged)}},
+    }));
+    for (const char* r : {"a", "b", "c"}) grid.insertReading(r);
+    ReadingGrid::PositionalCharScores s;
+    s.missingScore = -30;
+    s.table.resize(3);
+    s.table[0] = {{"甲", -4.0}, {"X", -0.5}, {"Y", -2.0}};
+    s.table[2] = {{"丙", -3.0}, {"Z", -1.25}};
+    const double alpha = 0.5;
+    auto r = grid.walkWithCharBonus(alpha, s);
+    ASSERT_EQ(Joined(r), "子丑寅");
+    const double expect =
+        flagged ? -1 + alpha * (-0.5 + -30 + -1.25) : -1 + alpha * (3 * -30.0);
+    EXPECT_NEAR(r.score, expect, 1e-12) << flagged;
+    auto nb = grid.walkNBestWithCharBonus(3, alpha, s);
+    ASSERT_FALSE(nb.empty());
+    EXPECT_EQ(Joined(nb[0]), "子丑寅");
+    EXPECT_NEAR(nb[0].score, expect, 1e-12) << flagged;
+    EXPECT_EQ(NBestReference::DiffNBest(
+                  nb, NBestReference::WalkNBestReference(grid, 3, alpha, &s),
+                  &grid),
+              "");
+    // alpha 0 and the plain walks ignore the flag.
+    ExpectSameWalk(grid.walkWithCharBonus(0.0, s), grid.walk());
+  }
+}
+
+TEST(ReadingGridTest, CharBonusFlaggedUnigramOverriddenKeepsStockScore) {
+  using U = LanguageModel::Unigram;
+  ReadingGrid grid(std::make_shared<FixedLM>(std::map<std::string, std::vector<U>>{
+      {"a", {U("甲", -1), U("乙", -2, "", true)}},
+  }));
+  grid.insertReading("a");
+  ASSERT_TRUE(grid.overrideCandidate(0, "乙"));
+  ReadingGrid::PositionalCharScores s;
+  s.table = {{{"甲", -0.5}}};
+  auto r = grid.walkWithCharBonus(1.0, s);
+  ASSERT_EQ(Joined(r), "乙");
+  EXPECT_DOUBLE_EQ(r.score, ReadingGrid::Node::kOverridingScore);
+}
+
+// Flagged unigrams in random tie-heavy grids: the optimized N-best equals the
+// reference and its top equals walkWithCharBonus().
+TEST(ReadingGridTest, NBestEqualsReferenceOnRandomGridsWithUserPhrases) {
+  std::mt19937 rng(8081);
+  const std::vector<std::string> syllables{"a", "b", "c", "d", "e"};
+  std::uniform_int_distribution<size_t> pickSyl(0, syllables.size() - 1);
+  std::uniform_int_distribution<int> len(1, 14);
+  std::bernoulli_distribution doOverride(0.3);
+  size_t comparisons = 0;
+  size_t flaggedOnTop = 0;
+  for (int g = 0; g < 300; ++g) {
+    auto lm = std::make_shared<RandomTieLM>(&rng);
+    lm->flagRandomUserPhrases(&rng, 0.15);
+    ReadingGrid grid(lm);
+    const int n = len(rng);
+    for (int j = 0; j < n; ++j) {
+      grid.insertReading(syllables[pickSyl(rng)]);
+    }
+    if (doOverride(rng) && grid.length() > 0) {
+      std::uniform_int_distribution<size_t> loc(0, grid.length() - 1);
+      size_t at = loc(rng);
+      auto cands = grid.candidatesAt(at);
+      if (!cands.empty()) {
+        std::uniform_int_distribution<size_t> pc(0, cands.size() - 1);
+        grid.overrideCandidate(at, cands[pc(rng)]);
+      }
+    }
+    for (size_t k : {1, 3, 10}) {
+      for (double alpha : {0.5, 1.0}) {
+        for (bool discrete : {false, true}) {
+          auto scores = RandomCharScores(grid, &rng, discrete);
+          ExpectNBestEqualsReference(grid, k, alpha, &scores,
+                                     "flagged grid " + std::to_string(g));
+          ++comparisons;
+          if (k == 1 && !discrete) {
+            auto best = grid.walkWithCharBonus(alpha, scores);
+            auto nb = grid.walkNBestWithCharBonus(1, alpha, scores);
+            ASSERT_FALSE(nb.empty());
+            EXPECT_NEAR(nb[0].score, best.score, 1e-9) << g;
+            for (const auto& node : best.nodes) {
+              flaggedOnTop += node->currentUnigram().isUserPhrase() ? 1 : 0;
+            }
+          }
+        }
+      }
+    }
+  }
+  EXPECT_EQ(comparisons, 300u * 3u * 2u * 2u);
+  EXPECT_GT(flaggedOnTop, 0u);
+}
+
 }  // namespace Formosa::Gramambular2
+

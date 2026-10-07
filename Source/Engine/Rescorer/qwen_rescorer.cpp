@@ -67,7 +67,8 @@ inline double LogProb(const float* logits, int n, int target) {
 
 }  // namespace
 
-QwenRescorer::QwenRescorer(const std::string& gguf_path, int n_gpu_layers) {
+QwenRescorer::QwenRescorer(const std::string& gguf_path, int n_gpu_layers,
+                           int n_threads) {
   llama_log_set(QuietLog, nullptr);
   static bool backend_inited = false;
   if (!backend_inited) {
@@ -85,8 +86,8 @@ QwenRescorer::QwenRescorer(const std::string& gguf_path, int n_gpu_layers) {
   cp.n_ubatch = 512;
   cp.n_seq_max = kMaxSeq;
   cp.kv_unified = true;
-  cp.n_threads = 4;
-  cp.n_threads_batch = 4;
+  cp.n_threads = n_threads;
+  cp.n_threads_batch = n_threads;
   ctx_ = llama_init_from_model(model_, cp);
   if (!ctx_) return;
 

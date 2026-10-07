@@ -62,6 +62,8 @@ private let kUseCustomUserPhraseLocation = "UseCustomUserPhraseLocation"
 // Hidden (no UI) R-walk switches, set with `defaults write`.
 private let kNeuralWalkEnabledKey = "AFMNeuralWalkEnabled"
 private let kNeuralWalkAlphaKey = "AFMNeuralWalkAlpha"
+private let kPreciseModeEnabledKey = "AFMPreciseModeEnabled"
+private let kAcceptYanReadingForAiKey = "AFMAcceptYanReadingForAi"
 private let kCustomUserPhraseLocation = "CustomUserPhraseLocation"
 
 private let kDefaultCandidateListTextSize: CGFloat = 16
@@ -271,6 +273,8 @@ class Preferences: NSObject {
             kCustomUserPhraseLocation,
             kNeuralWalkEnabledKey,
             kNeuralWalkAlphaKey,
+            kPreciseModeEnabledKey,
+            kAcceptYanReadingForAiKey,
         ]
     }
 
@@ -555,6 +559,18 @@ extension Preferences {
     /// selection identical to stock McBopomofo. Read on every activation.
     @UserDefault(key: kNeuralWalkAlphaKey, defaultValue: 0.5)
     @objc static var neuralWalkAlpha: Double
+
+    /// Precise mode: background re-ranking of uncertain R-walk results with
+    /// the heavy model (Bopomofo mode only). Off by default; turning it on
+    /// loads the heavy model, turning it off releases it.
+    @UserDefault(key: kPreciseModeEnabledKey, defaultValue: false)
+    @objc static var preciseModeEnabled: Bool
+
+    /// Reading policy: accept the reading ㄧㄢˊ for 癌 from the built-in
+    /// dictionary and associated phrases. Off by default (only ㄞˊ). Applied
+    /// to both language models on every activation.
+    @UserDefault(key: kAcceptYanReadingForAiKey, defaultValue: false)
+    @objc static var acceptYanReadingForAi: Bool
 }
 
 @objc class UserPhraseLocationHelper: NSObject {
@@ -589,6 +605,12 @@ extension Preferences {
     /// <root>/models/r-walk, where the R-walk model files live.
     @objc static var rWalkModelDirectory: String {
         (modelsDirectory as NSString).appendingPathComponent("r-walk")
+    }
+
+    /// <root>/models/qwen: the precise-mode heavy model (model.gguf) and its
+    /// calibration (precise.conf).
+    @objc static var qwenModelDirectory: String {
+        (modelsDirectory as NSString).appendingPathComponent("qwen")
     }
 
     @objc static var defaultUserPhraseLocation: String {

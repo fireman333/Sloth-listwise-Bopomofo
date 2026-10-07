@@ -98,6 +98,20 @@ class McBopomofoLM : public Formosa::Gramambular2::LanguageModel {
       const std::string& prefixValue,
       const std::vector<std::string>& prefixReadings) const;
 
+  // Reading policy: a (syllable, character) pair such as (ㄧㄢˊ, 癌). Built-in
+  // dictionary entries and associated phrases in which the character is
+  // aligned with the syllable (key syllables and value code points paired by
+  // position) are not returned. User phrases are never filtered. Entries whose
+  // value length differs from the number of syllables are kept. An empty list
+  // (the default) gives upstream behavior.
+  struct ReadingPolicyExclusion {
+    std::string syllable;
+    std::string character;
+  };
+  void setReadingPolicyExclusions(
+      std::vector<ReadingPolicyExclusion> exclusions);
+  const std::vector<ReadingPolicyExclusion>& readingPolicyExclusions() const;
+
   void setPhraseReplacementEnabled(bool enabled);
   bool phraseReplacementEnabled() const;
 
@@ -152,7 +166,15 @@ class McBopomofoLM : public Formosa::Gramambular2::LanguageModel {
       const std::vector<Formosa::Gramambular2::LanguageModel::Unigram>&
           unigrams,
       const std::unordered_set<std::string>& excludedValues,
-      std::unordered_set<std::string>& insertedValues) const;
+      std::unordered_set<std::string>& insertedValues,
+      bool isUserPhrase = false) const;
+
+  // True if any position i has (syllables[i], i-th code point of value) in
+  // readingPolicyExclusions_. False when the lengths differ.
+  bool violatesReadingPolicy(const std::vector<std::string>& syllables,
+                             const std::string& value) const;
+
+  std::vector<ReadingPolicyExclusion> readingPolicyExclusions_;
 
   ParselessLM languageModel_;
   UserPhrasesLM userPhrases_;

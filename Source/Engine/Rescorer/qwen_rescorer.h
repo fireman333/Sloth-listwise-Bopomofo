@@ -27,7 +27,10 @@ namespace McBopomofo {
 class QwenRescorer : public Rescorer {
  public:
   // n_gpu_layers: 99 = all layers on Metal; 0 = CPU only.
-  explicit QwenRescorer(const std::string& gguf_path, int n_gpu_layers = 99);
+  // n_threads: CPU threads for decode and batch (llama.cpp n_threads and
+  // n_threads_batch); the IME uses the default 4.
+  explicit QwenRescorer(const std::string& gguf_path, int n_gpu_layers = 99,
+                        int n_threads = 4);
   ~QwenRescorer() override;
   QwenRescorer(const QwenRescorer&) = delete;
   QwenRescorer& operator=(const QwenRescorer&) = delete;

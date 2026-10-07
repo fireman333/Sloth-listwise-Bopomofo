@@ -28,6 +28,7 @@
 #import <os/log.h>
 
 #import <chrono>
+#import <cmath>
 #import <string>
 #import <vector>
 
@@ -44,6 +45,7 @@
 extern "C" __attribute__((weak_import)) const OrtApiBase *ORT_API_CALL OrtGetApiBase(void) NO_EXCEPTION;
 
 const NSUInteger kAFMNeuralMaxSyllables = 40;
+NSNotificationName const AFMNeuralSelectorStateDidChangeNotification = @"AFMNeuralSelectorStateDidChangeNotification";
 
 // The app's bundle identifier, used for the log subsystem and queue labels.
 static NSString *AFMBundleIdentifier(void)
@@ -64,11 +66,12 @@ static os_log_t AFMNeuralLog(void)
 
 // Production loader. Runs on the load queue. Returns a heap-allocated scorer
 // wrapping a heap-allocated SlothRescorer, both intentionally never freed, or
-// nullptr with *error set.
-static McBopomofo::NeuralScorer *AFMLoadSlothScorer(NSString *modelDirectory, NSString **error)
+// nullptr with *error set (*notFound = YES when the model directory is missing).
+static McBopomofo::NeuralScorer *AFMLoadSlothScorer(NSString *modelDirectory, NSString **error, BOOL *notFound)
 {
     if (modelDirectory == nil) {
         *error = @"no model directory configured";
+        *notFound = YES;
         return nullptr;
     }
     if (&OrtGetApiBase == nullptr) {
@@ -78,6 +81,7 @@ static McBopomofo::NeuralScorer *AFMLoadSlothScorer(NSString *modelDirectory, NS
     BOOL isDirectory = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:modelDirectory isDirectory:&isDirectory] || !isDirectory) {
         *error = [NSString stringWithFormat:@"model directory missing: %@", modelDirectory];
+        *notFound = YES;
         return nullptr;
     }
     const OrtApiBase *apiBase = OrtGetApiBase();
@@ -128,7 +132,7 @@ static McBopomofo::NeuralScorer *AFMMakeBlockScorer(AFMNeuralScoreBlock block)
     });
 }
 
-typedef McBopomofo::NeuralScorer * (^AFMNeuralLoader)(NSString **error);
+typedef McBopomofo::NeuralScorer * (^AFMNeuralLoader)(NSString **error, BOOL *notFound);
 
 static AFMNeuralSelector *gSharedSelector = nil;
 
@@ -144,6 +148,9 @@ static AFMNeuralSelector *gSharedSelector = nil;
     McBopomofo::NeuralScorer *_scorer;
     McBopomofo::NeuralScoreCache _cache;
     McBopomofo::NeuralCircuitBreaker _breaker;
+    // A cache-miss measurement kept for the end-of-key-event hook (design D1).
+    BOOL _hasPendingBreakerMs;
+    double _pendingBreakerMs;
 }
 
 @synthesize state = _state;
@@ -153,6 +160,9 @@ static AFMNeuralSelector *gSharedSelector = nil;
 @synthesize lastLoadMilliseconds = _lastLoadMilliseconds;
 @synthesize forwardCount = _forwardCount;
 @synthesize neuralWalkCount = _neuralWalkCount;
+@synthesize breakerRecordCount = _breakerRecordCount;
+@synthesize precisePayloadCount = _precisePayloadCount;
+@synthesize circuitBreakerDisabledForTesting = _circuitBreakerDisabledForTesting;
 
 + (AFMNeuralSelector *)sharedSelector
 {
@@ -190,15 +200,15 @@ static AFMNeuralSelector *gSharedSelector = nil;
 - (instancetype)initWithModelDirectory:(NSString *)modelDirectory
 {
     NSString *directory = [modelDirectory copy];
-    return [self _initWithModelDirectory:directory loader:^McBopomofo::NeuralScorer *(NSString **error) {
-        return AFMLoadSlothScorer(directory, error);
+    return [self _initWithModelDirectory:directory loader:^McBopomofo::NeuralScorer *(NSString **error, BOOL *notFound) {
+        return AFMLoadSlothScorer(directory, error, notFound);
     }];
 }
 
 - (instancetype)initWithScoreBlockForTesting:(AFMNeuralScoreBlock)scoreBlock loadDelay:(NSTimeInterval)loadDelay
 {
     AFMNeuralScoreBlock block = [scoreBlock copy];
-    return [self _initWithModelDirectory:nil loader:^McBopomofo::NeuralScorer *(NSString **error) {
+    return [self _initWithModelDirectory:nil loader:^McBopomofo::NeuralScorer *(NSString **error, BOOL *notFound) {
         if (loadDelay > 0) {
             [NSThread sleepForTimeInterval:loadDelay];
         }
@@ -218,14 +228,15 @@ static AFMNeuralSelector *gSharedSelector = nil;
     if (!_enabled || _state != AFMNeuralSelectorStateDisabled) {
         return;
     }
-    _state = AFMNeuralSelectorStateLoading;
+    [self _setState:AFMNeuralSelectorStateLoading];
     AFMNeuralLoader loader = _loader;
     dispatch_async(_loadQueue, ^{
         auto t0 = std::chrono::steady_clock::now();
         NSString *error = nil;
+        BOOL notFound = NO;
         McBopomofo::NeuralScorer *scorer = nullptr;
         @try {
-            scorer = loader(&error);
+            scorer = loader(&error, &notFound);
         } @catch (NSException *exception) {
             scorer = nullptr;
             error = exception.reason;
@@ -236,12 +247,27 @@ static AFMNeuralSelector *gSharedSelector = nil;
             malloc_zone_pressure_relief(NULL, 0);
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self _publishScorer:scorer error:error milliseconds:ms];
+            [self _publishScorer:scorer error:error notFound:notFound milliseconds:ms];
         });
     });
 }
 
-- (void)_publishScorer:(McBopomofo::NeuralScorer *)scorer error:(NSString *)error milliseconds:(double)ms
+- (void)_setState:(AFMNeuralSelectorState)state
+{
+    if (_state == state) {
+        return;
+    }
+    _state = state;
+    if (NSThread.isMainThread) {
+        [NSNotificationCenter.defaultCenter postNotificationName:AFMNeuralSelectorStateDidChangeNotification object:self];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSNotificationCenter.defaultCenter postNotificationName:AFMNeuralSelectorStateDidChangeNotification object:self];
+        });
+    }
+}
+
+- (void)_publishScorer:(McBopomofo::NeuralScorer *)scorer error:(NSString *)error notFound:(BOOL)notFound milliseconds:(double)ms
 {
     _lastLoadMilliseconds = ms;
     if (_state != AFMNeuralSelectorStateLoading) {
@@ -250,18 +276,31 @@ static AFMNeuralSelector *gSharedSelector = nil;
         return;
     }
     if (scorer == nullptr) {
-        _state = AFMNeuralSelectorStateFailed;
+        [self _setState:notFound ? AFMNeuralSelectorStateNotFound : AFMNeuralSelectorStateFailed];
         os_log_error(AFMNeuralLog(), "R-walk unavailable, using the stock walk: %{public}@", error ?: @"unknown error");
         return;
     }
     _scorer = scorer;
     _cache.clear();
-    _state = AFMNeuralSelectorStateReady;
+    [self _setState:AFMNeuralSelectorStateReady];
     os_log_info(AFMNeuralLog(), "R-walk model ready in %.0f ms", ms);
 }
 
 - (Formosa::Gramambular2::ReadingGrid::WalkResult)walkGrid:(Formosa::Gramambular2::ReadingGrid &)grid
 {
+    return [self walkGrid:grid deferBreakerRecording:NO usedNeural:nullptr];
+}
+
+- (Formosa::Gramambular2::ReadingGrid::WalkResult)walkGrid:(Formosa::Gramambular2::ReadingGrid &)grid
+                                      deferBreakerRecording:(BOOL)deferBreakerRecording
+                                                 usedNeural:(BOOL *)outUsedNeural
+{
+    // A measurement left pending by the previous key event (its hook did not
+    // run) is recorded before anything else, so it counts exactly once.
+    [self flushPendingBreakerRecordingAddingMilliseconds:0];
+    if (outUsedNeural != nullptr) {
+        *outUsedNeural = NO;
+    }
     if (!_enabled || _alpha == 0 || _state != AFMNeuralSelectorStateReady || _scorer == nullptr || grid.length() == 0 || grid.length() > kAFMNeuralMaxSyllables) {
         return grid.walk();
     }
@@ -291,16 +330,76 @@ static AFMNeuralSelector *gSharedSelector = nil;
     if (usedNeural) {
         ++_neuralWalkCount;
     }
+    if (outUsedNeural != nullptr) {
+        *outUsedNeural = usedNeural;
+    }
 
     if (miss) {
-        _breaker.record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
-        if (_breaker.tripped()) {
-            _state = AFMNeuralSelectorStateTripped;
-            _cache.clear();
-            os_log_error(AFMNeuralLog(), "R-walk disabled for this process: %d consecutive keystrokes over %.0f ms", McBopomofo::NeuralCircuitBreaker::kConsecutive, McBopomofo::NeuralCircuitBreaker::kThresholdMs);
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (deferBreakerRecording) {
+            _hasPendingBreakerMs = YES;
+            _pendingBreakerMs = ms;
+        } else {
+            [self _recordBreakerMilliseconds:ms];
         }
     }
     return result;
+}
+
+- (void)flushPendingBreakerRecordingAddingMilliseconds:(double)extraMilliseconds
+{
+    if (!_hasPendingBreakerMs) {
+        return;
+    }
+    _hasPendingBreakerMs = NO;
+    [self _recordBreakerMilliseconds:_pendingBreakerMs + extraMilliseconds];
+}
+
+- (void)_recordBreakerMilliseconds:(double)ms
+{
+    ++_breakerRecordCount;
+    if (_circuitBreakerDisabledForTesting) {
+        return;
+    }
+    _breaker.record(ms);
+    if (_breaker.tripped() && _state != AFMNeuralSelectorStateTripped) {
+        [self _setState:AFMNeuralSelectorStateTripped];
+        _cache.clear();
+        os_log_error(AFMNeuralLog(), "R-walk disabled for this process: %d consecutive keystrokes over %.0f ms", McBopomofo::NeuralCircuitBreaker::kConsecutive, McBopomofo::NeuralCircuitBreaker::kThresholdMs);
+    }
+}
+
+- (std::optional<AFMPrecisePayload>)precisePayloadForGrid:(Formosa::Gramambular2::ReadingGrid &)grid
+                                            displayedText:(const std::string &)displayedText
+                                                   config:(const McBopomofo::PreciseConfig &)config
+{
+    if (!_enabled || _alpha == 0 || _state != AFMNeuralSelectorStateReady || _scorer == nullptr || grid.length() == 0 || grid.length() > kAFMNeuralMaxSyllables) {
+        return std::nullopt;
+    }
+    // Same table as the walk: no forward pass here.
+    const auto *scores = _cache.lookup(grid);
+    if (scores == nullptr) {
+        return std::nullopt;
+    }
+    ++_precisePayloadCount;
+    AFMPrecisePayload payload;
+    payload.candidates = McBopomofo::PreciseCandidates(grid, *scores, config);
+    McBopomofo::FilterFixedPositions(&payload.candidates, McBopomofo::FixedPositionsOf(grid));
+    size_t rank = McBopomofo::MoveDisplayedToFront(&payload.candidates, displayedText);
+    if (rank == std::string::npos) {
+        return std::nullopt;
+    }
+    // MoveDisplayedToFront also moves a lower-ranked text; only accept that for
+    // a tie with R's best (then rank 1 is the former rank 0).
+    if (rank > 0 && std::fabs(payload.candidates.rScores[0] - payload.candidates.rScores[1]) > 1e-9) {
+        return std::nullopt;
+    }
+    auto gate = McBopomofo::PreciseGate(grid.readings(), payload.candidates, config);
+    if (!gate.has_value()) {
+        return std::nullopt;
+    }
+    payload.gate = std::move(*gate);
+    return payload;
 }
 
 @end

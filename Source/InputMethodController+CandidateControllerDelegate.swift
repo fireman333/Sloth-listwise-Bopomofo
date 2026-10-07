@@ -103,6 +103,7 @@ extension McBopomofoInputMethodController: CandidateControllerDelegate {
             default:
                 break
             }
+            requestPreciseIfNeeded()
         case let state as InputState.AssociatedPhrases:
             let candidate = state.candidates[Int(index)]
             keyHandler.fixNodeForAssociatedPhraseWithPrefix(
@@ -113,7 +114,7 @@ extension McBopomofoInputMethodController: CandidateControllerDelegate {
                 return
             }
             handle(state: inputting, client: client)
-            break
+            requestPreciseIfNeeded()
         case let state as InputState.AssociatedPhrasesPlain:
             let selectedCandidate = state.candidates[Int(index)]
             handle(state: .Committing(poppedText: selectedCandidate.value), client: currentClient)

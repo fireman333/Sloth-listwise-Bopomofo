@@ -90,6 +90,7 @@ private struct PreferencesContentHeightKey: PreferenceKey {
 enum PreferencesTab: CaseIterable, Identifiable {
     case basic
     case userPhrases
+    case selectionModel
     case advanced
 
     var id: Self { self }
@@ -103,6 +104,8 @@ enum PreferencesTab: CaseIterable, Identifiable {
             BasicPreferencesView()
         case .userPhrases:
             UserPhrasesPreferencesView()
+        case .selectionModel:
+            SelectionModelPreferencesView()
         case .advanced:
             AdvancedPreferencesView()
         }
@@ -112,6 +115,7 @@ enum PreferencesTab: CaseIterable, Identifiable {
         switch self {
         case .basic: ("Basic", "switch.2")
         case .userPhrases: ("User Phrases", "folder")
+        case .selectionModel: ("Selection Model", "brain")
         case .advanced: ("Advanced", "gearshape")
         }
     }
@@ -155,6 +159,8 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
         private static let basicIdentifier = NSToolbarItem.Identifier("PreferencesToolbar.basic")
         private static let userPhrasesIdentifier =
             NSToolbarItem.Identifier("PreferencesToolbar.userPhrases")
+        private static let selectionModelIdentifier =
+            NSToolbarItem.Identifier("PreferencesToolbar.selectionModel")
         private static let advancedIdentifier =
             NSToolbarItem.Identifier("PreferencesToolbar.advanced")
 
@@ -211,6 +217,7 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
             [
                 Self.basicIdentifier,
                 Self.userPhrasesIdentifier,
+                Self.selectionModelIdentifier,
                 Self.advancedIdentifier,
             ]
         }
@@ -378,6 +385,8 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
                 basicIdentifier
             case .userPhrases:
                 userPhrasesIdentifier
+            case .selectionModel:
+                selectionModelIdentifier
             case .advanced:
                 advancedIdentifier
             }
@@ -389,6 +398,8 @@ private struct WindowToolbarConfigurator: NSViewRepresentable {
                 .basic
             case userPhrasesIdentifier:
                 .userPhrases
+            case selectionModelIdentifier:
+                .selectionModel
             case advancedIdentifier:
                 .advanced
             default:
@@ -682,6 +693,103 @@ private struct AdvancedPreferencesView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+/// The 14 domain-pack categories (macOS Zhuyin special vocabularies); shown
+/// as placeholders only.
+let kDomainPackTitleKeys = [
+    "Industry", "Traditional Chinese Medicine", "Biology", "Western Medicine", "Buddhism",
+    "Law and Politics", "Physics and Chemistry", "Architecture", "Military", "Business",
+    "Education", "Telecommunications", "Sports", "Computers",
+]
+
+/// Looks up a Localizable.strings key; replaceable so a view can be rendered
+/// in a given localization (screenshots in tests).
+struct PreferencesLocalizerKey: EnvironmentKey {
+    static let defaultValue: (String) -> String = { NSLocalizedString($0, comment: "") }
+}
+
+extension EnvironmentValues {
+    var preferencesLocalizer: (String) -> String {
+        get { self[PreferencesLocalizerKey.self] }
+        set { self[PreferencesLocalizerKey.self] = newValue }
+    }
+}
+
+struct SelectionModelPreferencesView: View {
+    @EnvironmentObject private var preferences: PreferencesViewModel
+    @Environment(\.preferencesLocalizer) private var localize
+
+    private func status(_ status: SelectionModelStatus) -> some View {
+        Text(String(format: localize("Status: %@"), localize(status.titleKey)))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    var body: some View {
+        FormBody {
+            PreferenceRow(localize("Neural Selection:")) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(localize("Choose characters with the neural model"), isOn: $preferences.neuralWalkEnabled)
+                    status(preferences.neuralStatus)
+                }
+            }
+
+            PreferenceRow(localize("Precise Mode:")) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(localize("Re-rank uncertain results in the background"), isOn: $preferences.preciseModeEnabled)
+                    status(preferences.preciseStatus)
+                }
+            }
+
+            PreferenceRow {
+                Text(localize("Precise mode uses about 1 GB of memory while it is on. Its model is installed separately."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 300, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            PreferenceRow(localize("Reading of 癌:")) {
+                Toggle(localize("Also accept ㄧㄢˊ (default: ㄞˊ only)"), isOn: $preferences.acceptYanReadingForAi)
+            }
+
+            PreferenceRow {
+                Text(localize("These settings take effect the next time you switch to this input method; precise mode starts loading right away."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 300, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+                .padding(.vertical, 5)
+
+            PreferenceRow(localize("Domain Packs:")) {
+                Text(localize("Not yet available"))
+                    .foregroundStyle(.secondary)
+            }
+
+            PreferenceRow {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
+                    ForEach(0..<(kDomainPackTitleKeys.count / 2), id: \.self) { row in
+                        GridRow {
+                            ForEach(0..<2, id: \.self) { column in
+                                // Column-first, so each column reads top to bottom in list order.
+                                let key = kDomainPackTitleKeys[column * (kDomainPackTitleKeys.count / 2) + row]
+                                Toggle(isOn: .constant(false)) {
+                                    Text(localize(key))
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                }
+                                .disabled(true)
+                            }
+                        }
+                    }
                 }
             }
         }

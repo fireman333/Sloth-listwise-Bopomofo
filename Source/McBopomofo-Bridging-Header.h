@@ -5,6 +5,7 @@
 @import Foundation;
 
 #import "AFMNeuralSelector.h"
+#import "AFMPreciseController.h"
 #import "KeyHandler.h"
 #import "LanguageModelManager.h"
 #import "ServiceProviderInputHelper.h"
