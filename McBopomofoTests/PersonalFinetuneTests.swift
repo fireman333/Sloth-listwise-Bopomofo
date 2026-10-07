@@ -22,6 +22,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 import SwiftUI
+import CryptoKit
 import XCTest
 
 @testable import McBopomofo
@@ -348,17 +349,29 @@ class PersonalTrainingTestCase: LearningTestCase {
     }
 
     func sha256Hex(_ data: Data) -> String {
-        let tmp = (root as NSString).appendingPathComponent("sha-\(UUID().uuidString)")
-        try? data.write(to: URL(fileURLWithPath: tmp))
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
-        p.arguments = ["-a", "256", tmp]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        try? p.run()
-        p.waitUntilExit()
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return String(out.prefix(64))
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A model folder under the test root with the clean_v1 export's files (never the installed model) and a pack.
+    func makeRealModelDirectory() throws -> String {
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("train/ranker/export/clean_v1").path
+        guard FileManager.default.fileExists(atPath: source + "/onnx/model_quantized.onnx") else {
+            throw XCTSkip("R model not found at \(source)")
+        }
+        let dir = (root as NSString).appendingPathComponent("real-r-walk")
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: dir + "/onnx", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: dir + "/personalize", withIntermediateDirectories: true)
+        for item in ["config.json", "phonetic_table.tsv", "syl_vocab.json", "tokenizer"] {
+            try fm.createSymbolicLink(atPath: dir + "/" + item, withDestinationPath: source + "/" + item)
+        }
+        try fm.createSymbolicLink(
+            atPath: dir + "/onnx/model_quantized.onnx", withDestinationPath: source + "/onnx/model_quantized.onnx")
+        try JSONSerialization.data(withJSONObject: ["pack_version": "test-pack-1"]).write(
+            to: URL(fileURLWithPath: dir + "/personalize/pack.json"))
+        return dir
     }
 
     /// Writes `count` distinct eligible 2-syllable records (times now - count ... now - 1) to the pool.
@@ -1002,28 +1015,6 @@ class PersonalSelectorTests: PersonalTrainingTestCase {
 
 class PersonalRealModelTests: PersonalTrainingTestCase {
 
-    /// A model folder under the test root with the clean_v1 export's files (never the installed model) and a pack.
-    func makeRealModelDirectory() throws -> String {
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("train/ranker/export/clean_v1").path
-        guard FileManager.default.fileExists(atPath: source + "/onnx/model_quantized.onnx") else {
-            throw XCTSkip("R model not found at \(source)")
-        }
-        let dir = (root as NSString).appendingPathComponent("real-r-walk")
-        let fm = FileManager.default
-        try fm.createDirectory(atPath: dir + "/onnx", withIntermediateDirectories: true)
-        try fm.createDirectory(atPath: dir + "/personalize", withIntermediateDirectories: true)
-        for item in ["config.json", "phonetic_table.tsv", "syl_vocab.json", "tokenizer"] {
-            try fm.createSymbolicLink(atPath: dir + "/" + item, withDestinationPath: source + "/" + item)
-        }
-        try fm.createSymbolicLink(
-            atPath: dir + "/onnx/model_quantized.onnx", withDestinationPath: source + "/onnx/model_quantized.onnx")
-        try JSONSerialization.data(withJSONObject: ["pack_version": "test-pack-1"]).write(
-            to: URL(fileURLWithPath: dir + "/personalize/pack.json"))
-        return dir
-    }
-
     func installVersion(modelDirectory dir: String, scale: Double, truncate: Bool) throws -> AFMPersonalVersionRequest {
         let versionDir = (personal as NSString).appendingPathComponent("v1")
         try FileManager.default.createDirectory(atPath: versionDir, withIntermediateDirectories: true)
@@ -1282,23 +1273,8 @@ class PersonalClearTests: PersonalTrainingTestCase {
     /// Integration on the test root with the real R model: an adopted, loaded version; clear -> r-personal gone,
     /// factory weights after reactivation, memory and pool gone.
     func testClearIntegrationWithRealModel() throws {
-        let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("train/ranker/export/clean_v1").path
-        guard FileManager.default.fileExists(atPath: source + "/onnx/model_quantized.onnx") else {
-            throw XCTSkip("R model not found at \(source)")
-        }
-        let dir = (root as NSString).appendingPathComponent("real-r-walk")
+        let dir = try makeRealModelDirectory()
         let fm = FileManager.default
-        try fm.createDirectory(atPath: dir + "/onnx", withIntermediateDirectories: true)
-        try fm.createDirectory(atPath: dir + "/personalize", withIntermediateDirectories: true)
-        for item in ["config.json", "phonetic_table.tsv", "syl_vocab.json", "tokenizer"] {
-            try fm.createSymbolicLink(atPath: dir + "/" + item, withDestinationPath: source + "/" + item)
-        }
-        try fm.createSymbolicLink(
-            atPath: dir + "/onnx/model_quantized.onnx", withDestinationPath: source + "/onnx/model_quantized.onnx")
-        try JSONSerialization.data(withJSONObject: ["pack_version": "test-pack-1"]).write(
-            to: URL(fileURLWithPath: dir + "/personalize/pack.json"))
         // Fake helper output bound to the real factory model.
         let sha = try XCTUnwrap(AFMFactoryModelSHA256(dir))
         XCTAssertTrue(AFMWriteFactoryWeightsFileForTesting(dir, helperDirectory + "/weights.bin", 1.05))

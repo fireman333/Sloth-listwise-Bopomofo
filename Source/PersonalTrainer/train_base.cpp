@@ -46,12 +46,6 @@ void PutStr(std::string* s, const std::string& v) {
 
 }  // namespace
 
-size_t BaseTensor::numel() const {
-  size_t n = 1;
-  for (uint32_t d : dims) n *= d;
-  return dims.empty() ? 0 : n;
-}
-
 const BaseTensor* TrainBase::find(const std::string& name) const {
   auto it = byName.find(name);
   return it == byName.end() ? nullptr : &tensors[it->second];

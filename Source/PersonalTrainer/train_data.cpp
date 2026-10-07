@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <fstream>
 #include <set>
-#include <sstream>
 
+#include "Personalize/personal_weights.h"
 #include "Personalize/pool_reader.h"
 #include "nlohmann/json.hpp"
 
@@ -24,14 +24,9 @@ int32_t ModelVocab::charId(const std::string& c) const {
 bool LoadTrainerVocab(const std::string& dir, int32_t nSyl, ModelVocab* out, std::string* error) {
   using nlohmann::json;
   auto load = [&](const std::string& p, json* j) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) {
-      if (error) *error = "cannot open " + p;
-      return false;
-    }
-    std::stringstream ss;
-    ss << in.rdbuf();
-    *j = json::parse(ss.str(), nullptr, false);
+    std::string text;
+    if (!Personalize::ReadFileBytes(p, &text, error)) return false;
+    *j = json::parse(text, nullptr, false);
     if (j->is_discarded()) {
       if (error) *error = "bad json " + p;
       return false;

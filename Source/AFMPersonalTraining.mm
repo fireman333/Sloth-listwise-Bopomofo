@@ -598,11 +598,6 @@ static AFMPersonalTrainingController *gSharedController = nil;
 
 #pragma mark Manifest (main thread copy; written on the store queue)
 
-- (NSDictionary *)manifestSnapshot
-{
-    return [_manifest copy];
-}
-
 - (void)_writeManifest
 {
     _manifest[@"format"] = @1;

@@ -206,7 +206,6 @@ FOUNDATION_EXPORT BOOL AFMWriteFactoryWeightsFileForTesting(NSString *modelDirec
 /// Called on main after each finished run with its final result string
 /// ("adopted", "not_significant", "failed:crash", "discarded:generation", ...).
 @property (copy, nonatomic, nullable) void (^runDidFinishHandler)(NSString *result);
-- (NSDictionary *)manifestSnapshot;
 /// Waits (spinning the main run loop) until the store queue is idle and no
 /// main-thread follow-up is pending.
 - (void)waitUntilIdleForTesting;

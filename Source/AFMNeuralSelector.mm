@@ -240,8 +240,6 @@ static AFMNeuralSelector *gSharedSelector = nil;
     // load started (a completion with another key is discarded).
     NSString *_loadedKey;
     NSString *_pendingKey;
-    AFMPersonalVersionRequest *_pendingRequest;
-    NSString *_baseIdentifier;
 }
 
 @synthesize state = _state;
@@ -434,7 +432,6 @@ static NSString *AFMLoadKey(AFMPersonalVersionRequest *request, AFMLoadConfig co
 {
     NSString *key = AFMLoadKey(request, config);
     _pendingKey = key;
-    _pendingRequest = request;
     ++_loadCount;
     if (request != nil && _state == AFMNeuralSelectorStateReady) {
         _personalStatus = AFMPersonalModelStatusLoading;
@@ -507,12 +504,10 @@ static NSString *AFMLoadKey(AFMPersonalVersionRequest *request, AFMLoadConfig co
         [self _freeOnLoadQueue:result.loaded];
         if (!stale) {
             _pendingKey = nil;
-            _pendingRequest = nil;
         }
         return;
     }
     _pendingKey = nil;
-    _pendingRequest = nil;
     if (result.loaded.scorer == nullptr) {
         if (_state == AFMNeuralSelectorStateLoading) {
             [self _setState:result.notFound ? AFMNeuralSelectorStateNotFound : AFMNeuralSelectorStateFailed];
@@ -534,7 +529,6 @@ static NSString *AFMLoadKey(AFMPersonalVersionRequest *request, AFMLoadConfig co
     _scorer = result.loaded.scorer;
     _cache.clear();
     _loadedKey = key;
-    _baseIdentifier = identifier;
     _modelIdentifier = identifier;
     if (request == nil) {
         _personalStatus = AFMPersonalModelStatusFactory;

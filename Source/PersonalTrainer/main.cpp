@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>

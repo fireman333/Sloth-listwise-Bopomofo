@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace McBopomofo {
 
@@ -336,7 +337,7 @@ struct SlothRescorer::Impl {
                              " tensors, the model " + std::to_string(shapes.size());
       return false;
     }
-    std::unordered_map<std::string, bool> seen;
+    std::unordered_set<std::string> seen;
     for (const auto& t : w->tensors) {
       auto it = shapes.find(t.name);
       if (it == shapes.end()) {
@@ -348,11 +349,10 @@ struct SlothRescorer::Impl {
         personalizationError = "shape mismatch for " + t.name;
         return false;
       }
-      if (seen[t.name]) {
+      if (!seen.insert(t.name).second) {
         personalizationError = "duplicate initializer " + t.name;
         return false;
       }
-      seen[t.name] = true;
     }
     personal = std::move(w);
     return true;

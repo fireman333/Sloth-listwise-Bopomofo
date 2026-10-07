@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
-#include <sstream>
 #include <unordered_map>
 
 #include "nlohmann/json.hpp"
+#include "personal_weights.h"
 
 namespace McBopomofo {
 namespace Personalize {
@@ -303,14 +303,9 @@ bool UsesRetracted(const Split& split, const std::unordered_set<int64_t>& retrac
 
 bool LoadModelVocab(const std::string& dir, Vocab* out, std::string* error) {
   auto load = [&](const std::string& p, json* j) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) {
-      if (error) *error = "cannot open " + p;
-      return false;
-    }
-    std::stringstream ss;
-    ss << in.rdbuf();
-    *j = json::parse(ss.str(), nullptr, false);
+    std::string text;
+    if (!ReadFileBytes(p, &text, error)) return false;
+    *j = json::parse(text, nullptr, false);
     if (j->is_discarded()) {
       if (error) *error = "bad json " + p;
       return false;

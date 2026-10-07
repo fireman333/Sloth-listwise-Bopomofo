@@ -53,7 +53,6 @@ struct BaseTensor {
   uint8_t zeroPoint = 0;
   std::vector<uint8_t> u8;
 
-  size_t numel() const;
 };
 
 struct TrainBase {

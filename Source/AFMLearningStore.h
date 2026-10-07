@@ -126,9 +126,6 @@ FOUNDATION_EXPORT BOOL AFMSecureInputHeldByClient(BOOL secureInputEnabled, int h
 /// as records). No-op while recording is off.
 - (void)appendRetractionForTimestamp:(double)timestamp;
 
-/// Runs `block` on the store queue (after earlier appends) if no clear bumped
-/// the generation in between (personal-finetune: pool scans, r-personal I/O).
-- (void)performOnStoreQueue:(dispatch_block_t)block;
 /// The store queue, for work that must be ordered with appends and clears.
 @property (readonly, nonatomic) dispatch_queue_t storeQueue;
 

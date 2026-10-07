@@ -518,16 +518,6 @@ static BOOL AFMSystemSecureInputCheck(pid_t clientPID)
     });
 }
 
-- (void)performOnStoreQueue:(dispatch_block_t)block
-{
-    uint64_t generation = _generation.load();
-    dispatch_async(_queue, ^{
-        if (self->_generation.load() == generation) {
-            block();
-        }
-    });
-}
-
 - (dispatch_queue_t)storeQueue
 {
     return _queue;

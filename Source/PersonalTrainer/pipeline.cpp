@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -14,6 +16,7 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 #include "McBopomofoLM.h"
@@ -165,7 +168,6 @@ bool ReadSentences(const std::string& path, std::vector<Sentence>* out, std::str
 }
 
 struct Pack {
-  json meta;
   pz::GateThresholds gate;
   pz::DataThresholds data;
   Recipe recipe;
@@ -178,12 +180,10 @@ struct Pack {
   std::shared_ptr<const TrainBase> base;
 };
 
-int LoadPack(const std::string& packDir, const std::string& modelDir, Pack* pack, std::string* error,
-             bool loadBase) {
+int LoadPack(const std::string& packDir, const std::string& modelDir, Pack* pack, std::string* error) {
   std::string text;
   if (!pz::ReadFileBytes(packDir + "/pack.json", &text, error)) return kExitPack;
-  pack->meta = json::parse(text, nullptr, false);
-  const json& m = pack->meta;
+  const json m = json::parse(text, nullptr, false);
   if (m.is_discarded() || !m.is_object() || !m.contains("factory_sha256") ||
       !m["factory_sha256"].is_string() || !m.contains("files") || !m["files"].is_object()) {
     *error = "pack.json malformed";
@@ -243,13 +243,11 @@ int LoadPack(const std::string& packDir, const std::string& modelDir, Pack* pack
     if (c.contains("bucket_upper") && c["bucket_upper"].is_array())
       for (const auto& b : c["bucket_upper"]) pack->bucketUpper.push_back(b.get<size_t>());
   }
-  if (loadBase) {
-    pack->base = ReadTrainBase(packDir + "/train-base.bin", error);
-    if (!pack->base) return kExitPack;
-    if (pz::ToHex(pack->base->factorySha) != pack->factoryShaHex) {
-      *error = "train-base.bin is for another factory model";
-      return kExitPack;
-    }
+  pack->base = ReadTrainBase(packDir + "/train-base.bin", error);
+  if (!pack->base) return kExitPack;
+  if (pz::ToHex(pack->base->factorySha) != pack->factoryShaHex) {
+    *error = "train-base.bin is for another factory model";
+    return kExitPack;
   }
   return 0;
 }
@@ -352,7 +350,7 @@ class Runner {
     std::string packDir = args_.packDir.empty() ? args_.modelDir + "/personalize" : args_.packDir;
     Pack pack;
     std::string err;
-    if (int rc = LoadPack(packDir, args_.modelDir, &pack, &err, true)) {
+    if (int rc = LoadPack(packDir, args_.modelDir, &pack, &err)) {
       report_["error"] = err;
       return End(rc, "failed:pack");
     }
@@ -652,7 +650,7 @@ int RunPipeline(const PipelineArgs& args, const PipelineHooks& hooks) {
 int CheckPack(const std::string& packDir, const std::string& modelDir, std::string* summary) {
   Pack pack;
   std::string err;
-  int rc = LoadPack(packDir, modelDir, &pack, &err, true);
+  int rc = LoadPack(packDir, modelDir, &pack, &err);
   json j;
   if (rc == 0) {
     j = {{"ok", true},
