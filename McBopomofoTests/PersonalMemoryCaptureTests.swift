@@ -580,3 +580,113 @@ class ContextKeyAcrossWalksTests: LearningTestCase {
         XCTAssertEqual(composing(type(keys, into: makeHandler())), "妳鍾")
     }
 }
+
+// MARK: - personal-finetune task 1.6 (E6): retraction feasibility (design D7)
+
+/// Records every handleInput call so the tests can see which keys reach KeyHandler.
+final class SpyKeyHandler: KeyHandler {
+    struct Call {
+        var charCode: UInt16
+        var keyCode: UInt16
+        var stateClass: String
+        var handled: Bool
+    }
+    var calls: [Call] = []
+
+    override func handle(
+        input: KeyHandlerInput, state: InputState, stateCallback: @escaping (InputState) -> Void,
+        errorCallback: @escaping () -> Void
+    ) -> Bool {
+        let stateClass = String(describing: Swift.type(of: state))
+        let handled = super.handle(
+            input: input, state: state, stateCallback: stateCallback, errorCallback: errorCallback)
+        calls.append(Call(charCode: input.charCode, keyCode: input.keyCode, stateClass: stateClass, handled: handled))
+        return handled
+    }
+}
+
+/// The retraction marker (D7) relies on: after a commit, the next Backspace / Delete with an empty buffer goes
+/// through IMK `handle(_:client:)` → `KeyHandler handleInput` and is passed through to the application
+/// (handled == NO). These tests drive real key-down NSEvents through the controller.
+class RetractionFeasibilityTests: LearningTestCase {
+
+    var client = FakeTextClient()
+
+    func makeSpyController() throws -> (McBopomofoInputMethodController, SpyKeyHandler) {
+        guard let imc = McBopomofoInputMethodController(server: nil, delegate: nil, client: nil) else {
+            throw XCTSkip("cannot create an input method controller without a server")
+        }
+        client = FakeTextClient()
+        imc.currentClient = client
+        let spy = SpyKeyHandler()
+        spy.delegate = imc
+        spy.inputMode = .bopomofo
+        spy.syncWithPreferences()
+        imc.keyHandler = spy
+        return (imc, spy)
+    }
+
+    func event(_ chars: String, keyCode: UInt16, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+        try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+                context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false,
+                keyCode: keyCode))
+    }
+
+    /// Types 中華 through KeyHandler events and commits it with a Return key-down event.
+    func commitZhongHua(_ imc: McBopomofoInputMethodController) throws {
+        for k in kZhongHuaKeys.map({ String($0) }) {
+            _ = imc.handle(try event(k, keyCode: 0), client: client)
+        }
+        XCTAssertEqual(client.marked, "中華")
+        XCTAssertTrue(imc.handle(try event("\r", keyCode: 36), client: client))
+        XCTAssertEqual(client.inserted, ["中華"])
+        XCTAssertEqual(poolRecords().count, 1)
+    }
+
+    func testBackspaceAfterCommitReachesKeyHandlerAndPassesThrough() throws {
+        let (imc, spy) = try makeSpyController()
+        try commitZhongHua(imc)
+        XCTAssertTrue(imc.state is InputState.Empty)
+        spy.calls.removeAll()
+        let passed = imc.handle(try event("\u{8}", keyCode: 51), client: client)
+        XCTAssertFalse(passed, "Backspace with an empty buffer must reach the application")
+        XCTAssertEqual(spy.calls.count, 1)
+        XCTAssertEqual(spy.calls.first?.charCode, 8)
+        XCTAssertEqual(spy.calls.first?.stateClass, "Empty")
+        XCTAssertEqual(spy.calls.first?.handled, false)
+        XCTAssertEqual(client.inserted, ["中華"])
+        XCTAssertTrue(imc.state is InputState.Empty)
+    }
+
+    func testDeleteVariantsAfterCommitPassThrough() throws {
+        let (imc, spy) = try makeSpyController()
+        try commitZhongHua(imc)
+        // Forward Delete (NSDeleteFunctionKey), Option+Backspace (delete word), Command+Backspace (delete line).
+        let keys: [(String, UInt16, NSEvent.ModifierFlags)] = [
+            ("\u{F728}", 117, [.function]), ("\u{8}", 51, [.option]), ("\u{8}", 51, [.command]),
+        ]
+        for (chars, code, flags) in keys {
+            spy.calls.removeAll()
+            XCTAssertFalse(imc.handle(try event(chars, keyCode: code, flags: flags), client: client), "\(code) \(flags)")
+            XCTAssertEqual(spy.calls.count, 1)
+            XCTAssertEqual(spy.calls.first?.handled, false)
+        }
+        XCTAssertEqual(client.inserted, ["中華"])
+    }
+
+    /// With associated phrases on, the Bopomofo-mode commit still ends in the empty state (post-commit
+    /// associated-phrase panels only exist in plain Bopomofo, which is never recorded), so the Backspace that
+    /// follows a recorded commit is passed through too.
+    func testAssociatedPhrasesOnBackspaceAfterCommitStillPassesThrough() throws {
+        Preferences.associatedPhrasesEnabled = true
+        let (imc, spy) = try makeSpyController()
+        try commitZhongHua(imc)
+        XCTAssertTrue(imc.state is InputState.Empty)
+        spy.calls.removeAll()
+        XCTAssertFalse(imc.handle(try event("\u{8}", keyCode: 51), client: client))
+        XCTAssertEqual(spy.calls.count, 1)
+        XCTAssertEqual(spy.calls.first?.stateClass, "Empty")
+    }
+}
