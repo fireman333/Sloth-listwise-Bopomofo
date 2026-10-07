@@ -140,6 +140,13 @@
 			remoteGlobalIDString = 6A0D4EA115FC0D2D00ABF4B3;
 			remoteInfo = McBopomofo;
 		};
+		AF5E00000000000000A00001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6A0D4E9415FC0CFA00ABF4B3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AF5E00000000000000A00000;
+			remoteInfo = AFMPersonalTrainer;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -644,6 +651,20 @@
 			passBuildSettingsInEnvironment = 1;
 			productName = Data;
 		};
+		AF5E00000000000000A00000 /* AFMPersonalTrainer */ = {
+			isa = PBXLegacyTarget;
+			buildArgumentsString = "Source/PersonalTrainer/xcode_build_helper.sh $(ACTION)";
+			buildConfigurationList = AF5E00000000000000A00003 /* Build configuration list for PBXLegacyTarget "AFMPersonalTrainer" */;
+			buildPhases = (
+			);
+			buildToolPath = /bin/sh;
+			buildWorkingDirectory = "$(SRCROOT)";
+			dependencies = (
+			);
+			name = AFMPersonalTrainer;
+			passBuildSettingsInEnvironment = 1;
+			productName = AFMPersonalTrainer;
+		};
 /* End PBXLegacyTarget section */
 
 /* Begin PBXNativeTarget section */
@@ -655,11 +676,13 @@
 				6A0D4E9F15FC0D2D00ABF4B3 /* Frameworks */,
 				6A0D4EA015FC0D2D00ABF4B3 /* Resources */,
 				AF5E00000000000000000010 /* Embed Frameworks */,
+				AF5E00000000000000A00006 /* Embed AFMPersonalTrainer */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				6A38BC2615FC131100A8A51F /* PBXTargetDependency */,
+				AF5E00000000000000A00002 /* PBXTargetDependency */,
 			);
 			name = McBopomofo;
 			packageProductDependencies = (
@@ -762,6 +785,7 @@
 				6ACA41CA15FC1D7500935EF6 /* McBopomofoInstaller */,
 				6A38BC2115FC12FD00A8A51F /* Data */,
 				D485D3B52796A8A000657FF3 /* McBopomofoTests */,
+				AF5E00000000000000A00000 /* AFMPersonalTrainer */,
 			);
 		};
 /* End PBXProject section */
@@ -826,6 +850,30 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		AF5E00000000000000A00006 /* Embed AFMPersonalTrainer */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Source/PersonalTrainer/xcode_build_helper.sh",
+				"$(OBJROOT)/AFMPersonalTrainer-cmake/signed/AFMPersonalTrainer",
+			);
+			name = "Embed AFMPersonalTrainer";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/AFMPersonalTrainer",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$SRCROOT/Source/PersonalTrainer/xcode_build_helper.sh\" embed\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		6A0D4E9E15FC0D2D00ABF4B3 /* Sources */ = {
@@ -924,6 +972,11 @@
 			isa = PBXTargetDependency;
 			target = 6A0D4EA115FC0D2D00ABF4B3 /* McBopomofo */;
 			targetProxy = D485D3BA2796A8A000657FF3 /* PBXContainerItemProxy */;
+		};
+		AF5E00000000000000A00002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AF5E00000000000000A00000 /* AFMPersonalTrainer */;
+			targetProxy = AF5E00000000000000A00001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1582,6 +1635,24 @@
 			};
 			name = Release;
 		};
+		AF5E00000000000000A00004 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		AF5E00000000000000A00005 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1626,6 +1697,15 @@
 			buildConfigurations = (
 				D485D3BC2796A8A000657FF3 /* Debug */,
 				D485D3BD2796A8A000657FF3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AF5E00000000000000A00003 /* Build configuration list for PBXLegacyTarget "AFMPersonalTrainer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AF5E00000000000000A00004 /* Debug */,
+				AF5E00000000000000A00005 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -27,3 +27,4 @@ build-release/
 build-selection*/
 *.profraw
 build-llama/
+build-trainer/
