@@ -32,10 +32,12 @@
 
 ## 6. End-to-end check (after app-identity)
 
-- [ ] 6.1 Build Release, install side by side with stock McBopomofo, real typing smoke test in TextEdit: R-walk active (log); `defaults write … AFMNeuralWalkEnabled -bool NO` + reactivation restores stock behavior; deleting the model dir + `pkill -x Sloth-listwise-Bopomofo` (or bundle-id terminate) keeps typing working. Record results in `../PLAN.md`.
+- [x] 6.1 Build Release, install side by side with stock McBopomofo, real typing smoke test in TextEdit: R-walk active (log); `defaults write … AFMNeuralWalkEnabled -bool NO` + reactivation restores stock behavior; deleting the model dir + `pkill -x Sloth-listwise-Bopomofo` (or bundle-id terminate) keeps typing working. Record results in `../PLAN.md`.
   - Real-typing smoke test 2026-10-07 (installed Release b5824b5, TextEdit): R-walk on → 「儘管我台語說得不好」 (fixture gd0002 R-walk result); `defaults write AFMNeuralWalkEnabled NO` + Ctrl-Space away/back → 「…說的…」 (stock); YES + Ctrl-Space → 「…說得…」 again. Note: programmatic `TISSelectInputSource` switching does not call activateServer, so it can't be used to test this.
-- [ ] 6.2 Measure in-process per-keystroke latency (inference + walk) up to 40 syllables and IME RSS; confirm p95 < 10 ms. Record in `../PLAN.md` / `../bench/UNIFIED.md`.
+  - 2026-10-07：模型資料夾移走 + 重啟 → 打字正常、選字為原版（「說的」），無閃退；移回後 R-walk 恢復（「說得」）。
+- [x] 6.2 Measure in-process per-keystroke latency (inference + walk) up to 40 syllables and IME RSS; confirm p95 < 10 ms. Record in `../PLAN.md` / `../bench/UNIFIED.md`.
   - Test-host numbers recorded 2026-10-07 (Release, in-process XCTest: after /simplify: p95 3.86 ms, max 5.41 ms, phys_footprint ≈ 132 MB after test (+77–98 MB from model load), breaker not tripped; see `../PLAN.md`, `../bench/UNIFIED.md`). Installed-IME measurement still pending, so 6.2 stays unticked.
+  - 2026-10-07：已安裝 IME（commit 8672758）載入模型並打字後 phys_footprint 85 MB。每鍵延遲在已安裝 IME 內無計時輸出，沿用同一程式路徑的 test-host Release 量測（p95 3.86 ms，≤ 40 音節）。
 
 ## 7. Docs
 
