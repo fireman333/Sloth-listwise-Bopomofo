@@ -11,7 +11,7 @@ context: |
   Stack & Constraints: Swift + Objective-C++ App (InputMethodKit); C++ engine (Source/Engine/gramambular2, Source/Engine/Rescorer);
   onnxruntime 1.30 int8 CPU (R/D/ELECTRA); llama.cpp + Metal (Qwen3 q8_0); Apple Silicon, macOS 26+, Xcode 27.
   Per-key latency p95 < 10 ms. Only the composing buffer may change; committed text is never modified.
-  Fallback chain: precise mode -> R-walk -> D -> plain walk; model failure must never block typing.
+  Fallback chain: precise mode -> R-walk -> stock walk (no D layer); model failure must never block typing.
   Reading policy: 癌 defaults to ㄞˊ (ㄧㄢˊ only if user opts in); 一/不 accept base tone and sandhi.
   Training data must not include c4, Wikipedia, CC BY-ND, NC, or Apple Foundation Models output.
   Out of scope: cloud inference (typing never leaves the device); editing committed text; reading other apps' text as context;

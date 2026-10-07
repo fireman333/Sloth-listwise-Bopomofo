@@ -30,7 +30,7 @@ macOS 注音輸入法（fork 小麥注音 McBopomofo），每鍵用本機小模�
 
 ## Failure Modes & Constraints
 
-- 模型載入失敗 / 推論失敗 / 逾時 → 依序退回：精準模式 → R-walk → D → 原版 walk；不得讓輸入法無法打字
+- 模型載入失敗 / 推論失敗 / 逾時 → 依序退回：精準模式 → R-walk → 原版 walk（不保留 D 層，見 selection-pipeline change D5）；不得讓輸入法無法打字
 - 背景重排結果過期（使用者已繼續輸入）→ 丟棄，不套用
 - 使用者手動選字（UserOverrideModel）永遠優先於模型分數
 
@@ -49,7 +49,9 @@ macOS 注音輸入法（fork 小麥注音 McBopomofo），每鍵用本機小模�
 ## Deploy & Distribution
 
 - 開發期：本機 build，安裝到 `~/Library/Input Methods`
-- 模型檔：`~/Library/Application Support/AFMInput/`
+- App 身分：bundle id `io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo`，顯示名稱 Sloth-listwise Bopomofo，安裝為 `~/Library/Input Methods/Sloth-listwise-Bopomofo.app`（可與原版小麥注音並存；見 `app-identity` change）
+- 使用者資料：`~/Library/Application Support/Sloth-listwise-Bopomofo/`
+- 模型檔：`~/Library/Application Support/Sloth-listwise-Bopomofo/models/`（R-walk 在 `models/r-walk/`，程式常數 `UserPhraseLocationHelper.rWalkModelDirectory`）
 - 發佈：簽章 + notarization（之後階段）
 
 ## Key People & Sources
