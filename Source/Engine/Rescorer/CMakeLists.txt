@@ -44,11 +44,20 @@ if (RESCORER_SLOTH)
     find_library(ONNXRUNTIME_LIB onnxruntime
         PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
 
+    # Personalized weights (personal-finetune D11): personalize_weights from
+    # ../Personalize (added here without its tests when configured standalone).
+    if (NOT TARGET personalize_weights)
+        set(_saved_enable_test "${ENABLE_TEST}")
+        set(ENABLE_TEST OFF)
+        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../Personalize" "${CMAKE_CURRENT_BINARY_DIR}/personalize")
+        set(ENABLE_TEST "${_saved_enable_test}")
+    endif ()
+
     add_library(sloth_rescorer STATIC sloth_rescorer.h sloth_rescorer.cpp rescorer.h)
     target_include_directories(sloth_rescorer
         PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
         PRIVATE "${ONNXRUNTIME_ROOT}/include")
-    target_link_libraries(sloth_rescorer PUBLIC "${ONNXRUNTIME_LIB}")
+    target_link_libraries(sloth_rescorer PUBLIC "${ONNXRUNTIME_LIB}" personalize_weights)
     target_compile_features(sloth_rescorer PUBLIC cxx_std_17)
 
     if (ENABLE_TEST)
@@ -56,7 +65,9 @@ if (RESCORER_SLOTH)
         target_link_libraries(sloth_rescorer_test sloth_rescorer GTest::gtest_main)
         target_compile_definitions(sloth_rescorer_test PRIVATE
             SLOTH_MODEL_DIR="${SLOTH_MODEL_DIR}"
-            SLOTH_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/sloth_fixture.tsv")
+            SLOTH_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/sloth_fixture.tsv"
+            R_MODEL_DIR="${CMAKE_CURRENT_LIST_DIR}/../../../../train/ranker/export/clean_v1"
+            PERSONAL_OVERRIDE_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/testdata/personal_override_fixture.tsv")
         # Let the test binary find libonnxruntime.dylib without installing it.
         set_target_properties(sloth_rescorer_test PROPERTIES
             BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")

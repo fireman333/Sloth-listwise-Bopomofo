@@ -3,6 +3,7 @@
 #include <onnxruntime_cxx_api.h>
 
 #include "ort_env.h"
+#include "Personalize/onnx_initializers.h"
 
 #include <algorithm>
 #include <cmath>
@@ -195,10 +196,12 @@ constexpr double kMissingCharLogp = -30.0;  // same as the Python reference.
 
 struct SlothRescorer::Impl {
   Ort::Env env = MakeOfflineOrtEnv("SlothRescorer");
-  // Override buffers and their OrtValues must outlive the session (declared
-  // before it, so destroyed after it).
-  std::shared_ptr<const std::vector<SlothRescorer::Options::InitializerOverride>> overrides;
+  // Personalized weights and their OrtValues must outlive the session
+  // (declared before it, so destroyed after it).
+  std::shared_ptr<const Personalize::PersonalWeights> personal;
   std::vector<Ort::Value> overrideValues;
+  bool personalized = false;
+  std::string personalizationError;
   std::unique_ptr<Ort::Session> session;
   std::unordered_map<std::string, int64_t> sylId;   // syllable -> input id
   std::unordered_map<std::string, int64_t> charId;  // char -> output id
@@ -263,25 +266,96 @@ struct SlothRescorer::Impl {
     so.DisableCpuMemArena();
     std::string onnxPath = dir + "/onnx/" + opt.onnxFile;
     if (!std::ifstream(onnxPath)) throw std::runtime_error("cannot open " + onnxPath);
-    if (opt.overrides) {
-      overrides = opt.overrides;
-      Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-      overrideValues.reserve(overrides->size());
-      for (const auto& o : *overrides) {
-        if (!o.int8Data.empty()) {
+    if (opt.overrides || !opt.overridesPath.empty()) {
+      std::string bytes;
+      if (PreparePersonal(onnxPath, opt, &bytes)) {
+        Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+        Ort::SessionOptions pso = so.Clone();
+        overrideValues.reserve(2 * personal->tensors.size());
+        for (const auto& t : personal->tensors) {
+          const int64_t qShape[2] = {static_cast<int64_t>(t.in), static_cast<int64_t>(t.out)};
+          const int64_t sShape[1] = {static_cast<int64_t>(t.out)};
           overrideValues.push_back(Ort::Value::CreateTensor<int8_t>(
-              mem, const_cast<int8_t*>(o.int8Data.data()), o.int8Data.size(), o.shape.data(),
-              o.shape.size()));
-        } else {
+              mem, const_cast<int8_t*>(t.values.data()), t.values.size(), qShape, 2));
+          pso.AddInitializer((t.name + "_quantized").c_str(), overrideValues.back());
           overrideValues.push_back(Ort::Value::CreateTensor<float>(
-              mem, const_cast<float*>(o.floatData.data()), o.floatData.size(), o.shape.data(),
-              o.shape.size()));
+              mem, const_cast<float*>(t.scales.data()), t.scales.size(), sShape, 1));
+          pso.AddInitializer((t.name + "_scale").c_str(), overrideValues.back());
         }
-        so.AddInitializer(o.name.c_str(), overrideValues.back());
+        try {
+          // Built from the bytes that were hashed (no second read of the file).
+          session = std::make_unique<Ort::Session>(env, bytes.data(), bytes.size(), pso);
+          personalized = true;
+        } catch (const std::exception& e) {
+          personalizationError = std::string("session with personalized weights failed: ") + e.what();
+        }
+      }
+      if (!personalized) {
+        overrideValues.clear();
+        personal.reset();
       }
     }
-    session = std::make_unique<Ort::Session>(env, onnxPath.c_str(), so);
+    if (!session) session = std::make_unique<Ort::Session>(env, onnxPath.c_str(), so);
     ready = true;
+  }
+
+  // Reads / validates the personalized weights against the factory file
+  // (design D11). On success `personal` is set and *bytes holds the factory
+  // file; on failure personalizationError is set.
+  bool PreparePersonal(const std::string& onnxPath, const SlothRescorer::Options& opt,
+                       std::string* bytes) {
+    std::string err;
+    std::shared_ptr<const Personalize::PersonalWeights> w = opt.overrides;
+    if (!w) {
+      Personalize::WeightsReadOptions ro;
+      ro.expectedTensors = 0;  // checked against the model below
+      w = Personalize::ReadWeightsFile(opt.overridesPath, ro, &err);
+      if (!w) {
+        personalizationError = "cannot read personalized weights: " + err;
+        return false;
+      }
+    }
+    if (!Personalize::ReadFileBytes(onnxPath, bytes, &err)) {
+      personalizationError = err;
+      return false;
+    }
+    if (Personalize::Sha256(bytes->data(), bytes->size()) != w->factorySha) {
+      personalizationError = "personalized weights belong to another factory model";
+      return false;
+    }
+    Personalize::OnnxModelInfo info;
+    std::vector<Personalize::QuantizedLinear> linears;
+    if (!Personalize::ScanOnnxModel(*bytes, &info, &err) ||
+        !Personalize::FactoryLinears(info, &linears, &err, /*withData=*/false)) {
+      personalizationError = "cannot read factory model initializers: " + err;
+      return false;
+    }
+    auto shapes = Personalize::LinearShapes(linears);
+    if (w->tensors.size() != shapes.size()) {
+      personalizationError = "personalized weights have " + std::to_string(w->tensors.size()) +
+                             " tensors, the model " + std::to_string(shapes.size());
+      return false;
+    }
+    std::unordered_map<std::string, bool> seen;
+    for (const auto& t : w->tensors) {
+      auto it = shapes.find(t.name);
+      if (it == shapes.end()) {
+        personalizationError = "unknown initializer " + t.name;
+        return false;
+      }
+      if (it->second.first != t.in || it->second.second != t.out ||
+          t.values.size() != static_cast<size_t>(t.in) * t.out || t.scales.size() != t.out) {
+        personalizationError = "shape mismatch for " + t.name;
+        return false;
+      }
+      if (seen[t.name]) {
+        personalizationError = "duplicate initializer " + t.name;
+        return false;
+      }
+      seen[t.name] = true;
+    }
+    personal = std::move(w);
+    return true;
   }
 
   // One forward pass (batch of 1, hints = 0). Returns false on shape error.
@@ -456,6 +530,12 @@ SlothRescorer::SlothRescorer(const std::string& modelDir, const Options& options
 SlothRescorer::~SlothRescorer() = default;
 
 bool SlothRescorer::ready() const { return impl_ && impl_->ready; }
+
+bool SlothRescorer::personalized() const { return ready() && impl_->personalized; }
+
+std::string SlothRescorer::personalizationError() const {
+  return impl_ ? impl_->personalizationError : std::string("not loaded");
+}
 
 std::vector<double> SlothRescorer::score(const RescoreRequest& request) {
   if (!ready()) return {};

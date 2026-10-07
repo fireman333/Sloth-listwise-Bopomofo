@@ -17,6 +17,8 @@
 		AF7C00000000000000000009 /* LearningNoticePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF7C00000000000000000008 /* LearningNoticePanel.swift */; };
 		AF7A00000000000000000003 /* qwen_rescorer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AF7A00000000000000000002 /* qwen_rescorer.cpp */; };
 		AF5E0000000000000000000B /* AFMNeuralSelector.mm in Sources */ = {isa = PBXBuildFile; fileRef = AF5E00000000000000000002 /* AFMNeuralSelector.mm */; };
+		AF7D00000000000000000005 /* personal_weights.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AF7D00000000000000000002 /* personal_weights.cpp */; };
+		AF7D00000000000000000006 /* onnx_initializers.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AF7D00000000000000000004 /* onnx_initializers.cpp */; };
 		AF5E0000000000000000000C /* sloth_rescorer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AF5E00000000000000000004 /* sloth_rescorer.cpp */; };
 		AF5E0000000000000000000D /* libonnxruntime.1.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AF5E00000000000000000007 /* libonnxruntime.1.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		AF5E0000000000000000000E /* NeuralSelectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF5E00000000000000000008 /* NeuralSelectorTests.swift */; };
@@ -157,6 +159,10 @@
 		AF5E00000000000000000001 /* AFMNeuralSelector.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AFMNeuralSelector.h; sourceTree = "<group>"; };
 		AF5E00000000000000000002 /* AFMNeuralSelector.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AFMNeuralSelector.mm; sourceTree = "<group>"; };
 		AF5E00000000000000000003 /* sloth_rescorer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = sloth_rescorer.h; sourceTree = "<group>"; };
+		AF7D00000000000000000001 /* personal_weights.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = personal_weights.h; sourceTree = "<group>"; };
+		AF7D00000000000000000002 /* personal_weights.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = personal_weights.cpp; sourceTree = "<group>"; };
+		AF7D00000000000000000003 /* onnx_initializers.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = onnx_initializers.h; sourceTree = "<group>"; };
+		AF7D00000000000000000004 /* onnx_initializers.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = onnx_initializers.cpp; sourceTree = "<group>"; };
 		AF5E00000000000000000004 /* sloth_rescorer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = sloth_rescorer.cpp; sourceTree = "<group>"; };
 		AF5E00000000000000000005 /* rescorer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = rescorer.h; sourceTree = "<group>"; };
 		AF5E00000000000000000006 /* neural_walk.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = neural_walk.h; sourceTree = "<group>"; };
@@ -427,6 +433,7 @@
 			children = (
 				6A4F5F8F2879E838008C4307 /* gramambular2 */,
 				6A0D4F1F15FC0EB100ABF4B3 /* Mandarin */,
+				AF7D00000000000000000007 /* Personalize */,
 				AF5E0000000000000000000A /* Rescorer */,
 				6ADF5B132BA513E000577D98 /* AssociatedPhrasesV2.cpp */,
 				6ADF5B182BA513E000577D98 /* AssociatedPhrasesV2.h */,
@@ -452,6 +459,17 @@
 				6A833E512F0A0FB30086AD0C /* VariantAnnotator.cpp */,
 			);
 			path = Engine;
+			sourceTree = "<group>";
+		};
+		AF7D00000000000000000007 /* Personalize */ = {
+			isa = PBXGroup;
+			children = (
+				AF7D00000000000000000004 /* onnx_initializers.cpp */,
+				AF7D00000000000000000003 /* onnx_initializers.h */,
+				AF7D00000000000000000002 /* personal_weights.cpp */,
+				AF7D00000000000000000001 /* personal_weights.h */,
+			);
+			path = Personalize;
 			sourceTree = "<group>";
 		};
 		AF5E0000000000000000000A /* Rescorer */ = {
@@ -832,6 +850,8 @@
 				AF7C00000000000000000005 /* AFMLearningStore.mm in Sources */,
 				AF7C00000000000000000009 /* LearningNoticePanel.swift in Sources */,
 				AF5E0000000000000000000C /* sloth_rescorer.cpp in Sources */,
+				AF7D00000000000000000005 /* personal_weights.cpp in Sources */,
+				AF7D00000000000000000006 /* onnx_initializers.cpp in Sources */,
 				AF7A00000000000000000003 /* qwen_rescorer.cpp in Sources */,
 				AF7B00000000000000000005 /* precise_walk.cpp in Sources */,
 				6A4F5F982879E838008C4307 /* reading_grid.cpp in Sources */,

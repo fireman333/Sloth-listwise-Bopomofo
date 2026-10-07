@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Personalize/personal_weights.h"
 #include "rescorer.h"
 
 namespace McBopomofo {
@@ -30,18 +31,20 @@ class SlothRescorer : public Rescorer {
     int intraOpThreads = 1;
     // File name under <modelDir>/onnx/.
     std::string onnxFile = "model_quantized.onnx";
-    // Initializers that replace same-name initializers of the ONNX file at
-    // session creation (OrtApi::AddInitializer); the file is not modified.
-    // Used to load personalized int8 weights (val_N_quantized / val_N_scale).
-    // Buffers are shared with the rescorer, which keeps them alive for the
-    // session's lifetime. nullptr = the file's own weights.
-    struct InitializerOverride {
-      std::string name;
-      std::vector<int64_t> shape;
-      std::vector<int8_t> int8Data;  // used when non-empty
-      std::vector<float> floatData;  // used otherwise
-    };
-    std::shared_ptr<const std::vector<InitializerOverride>> overrides;
+    // Personalized int8 linears (personal-finetune design D11). Before the
+    // session is created the rescorer checks that the weights were built from
+    // this factory file (SHA-256 of its bytes) and that they cover exactly its
+    // MatMulInteger weights with the same shapes (ORT silently ignores an
+    // unknown initializer name), then overrides <name>_quantized /
+    // <name>_scale with OrtApi::AddInitializer; the file is not modified and
+    // the hashed bytes are the bytes the session is built from. The weights
+    // are kept alive by the rescorer for the session's lifetime. Any failed
+    // check -> the factory weights are used and personalizationError() says
+    // why. nullptr / empty = the file's own weights (no extra work).
+    std::shared_ptr<const Personalize::PersonalWeights> overrides;
+    // Alternatively a weights.bin path, read during construction (used when
+    // `overrides` is null).
+    std::string overridesPath;
   };
 
   // Never throws. On any load failure ready() is false and score() returns {}.
@@ -53,6 +56,11 @@ class SlothRescorer : public Rescorer {
   SlothRescorer& operator=(const SlothRescorer&) = delete;
 
   bool ready() const override;
+
+  // True when personalized weights were requested and applied.
+  bool personalized() const;
+  // Why requested personalized weights were not applied (empty otherwise).
+  std::string personalizationError() const;
   std::vector<double> score(const RescoreRequest& request) override;
 
   // Per-position character log-probabilities for in-walk scoring (R-walk).

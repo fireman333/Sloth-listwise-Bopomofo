@@ -29,11 +29,12 @@
 //             times n repetitions of (a) the full sentence and (b) every keystroke prefix,
 //             p50/p95 overall and by buffer length (<=8, 9-16, >16), plus load average,
 //             into lat_cpp_rwalk_a<alpha><tag>.json.
-//   --override-weights  (E1, personal-finetune task 1.1) read merged fp32 linear weights
-//             (AFMMW001 file from train/personalize/e1/export_weights.py), quantize them with
-//             the shipped per-channel rule (scale = max|w|/127 per output column, zp 0, rint,
-//             clip +-127) and override val_N_quantized / val_N_scale of --sloth-onnx at session
-//             creation (OrtApi::AddInitializer). Applies to --walk-mode. With --override-check n
+//   --override-weights  personalized weights (personal-finetune): a weights.bin (AFMRPW01,
+//             design D9) or merged fp32 linear weights (AFMMW001 file from
+//             train/personalize/e1/export_weights.py, E1) quantized with the shipped per-channel
+//             rule (scale = max|w|/127 per output column, zp 0, rint, clip +-127); they override
+//             val_N_quantized / val_N_scale of --sloth-onnx at session creation
+//             (SlothRescorer::Options::overrides, AddInitializer after the SHA / name checks). Applies to --walk-mode. With --override-check n
 //             instead: load a plain and an overridden session, compare charLogProbs on the first
 //             n items (bit-identical count, max |diff|), and print load times and RSS as JSON.
 //   --nbest-only  (E5, personal-finetune task 1.5) only walkNBest(--k) per sentence, written
@@ -68,6 +69,7 @@
 #include "rescorer.h"
 #ifdef RESCORER_BENCH_WITH_SLOTH
 #include "neural_walk.h"
+#include "Personalize/quantize.h"
 #include "sloth_rescorer.h"
 #endif
 #ifdef RESCORER_BENCH_WITH_QWEN
@@ -115,7 +117,7 @@ struct Item {
 
 
 #ifdef RESCORER_BENCH_WITH_SLOTH
-using Overrides = std::vector<McBopomofo::SlothRescorer::Options::InitializerOverride>;
+using Overrides = McBopomofo::Personalize::PersonalWeights;
 
 static double RssMB() {
   mach_task_basic_info info;
@@ -132,21 +134,36 @@ static double MaxRssMB() {
   return ru.ru_maxrss / 1048576.0;  // bytes on macOS
 }
 
-// Reads an AFMMW001 file (merged fp32 [in,out] per ONNX base name) and quantizes
-// each tensor per output column: scale = max|w[:,j]| / 127 (fp32), q = clip(rint(w / scale)).
-static std::shared_ptr<const Overrides> LoadOverrides(const std::string& path, double* quantMs) {
+// Reads personalized weights for --override-weights: a weights.bin (AFMRPW01,
+// personal-finetune D9) as is, or an AFMMW001 file (merged fp32 [in,out] per ONNX
+// base name, E1) quantized per output column with the shipped rule
+// (Personalize::QuantizePerChannel) and bound to the SHA-256 of `onnxPath`.
+static std::shared_ptr<const Overrides> LoadOverrides(const std::string& path,
+                                                      const std::string& onnxPath, double* quantMs) {
+  namespace P = McBopomofo::Personalize;
   std::ifstream f(path, std::ios::binary);
   if (!f) return nullptr;
   char magic[8];
   f.read(magic, 8);
-  if (!f || std::memcmp(magic, "AFMMW001", 8) != 0) return nullptr;
+  if (!f) return nullptr;
+  std::string err;
+  if (std::memcmp(magic, P::kWeightsMagic, 8) == 0) {
+    P::WeightsReadOptions ro;
+    ro.expectedTensors = 0;
+    auto w = P::ReadWeightsFile(path, ro, &err);
+    if (!w) fprintf(stderr, "%s: %s\n", path.c_str(), err.c_str());
+    if (quantMs) *quantMs = 0;
+    return w;
+  }
+  if (std::memcmp(magic, "AFMMW001", 8) != 0) return nullptr;
   auto rd32 = [&]() {
     uint32_t v = 0;
     f.read(reinterpret_cast<char*>(&v), 4);
     return v;
   };
-  uint32_t count = rd32();
   auto out = std::make_shared<Overrides>();
+  if (!P::Sha256File(onnxPath, &out->factorySha, &err)) return nullptr;
+  uint32_t count = rd32();
   double qms = 0;
   for (uint32_t t = 0; t < count && f; ++t) {
     std::string name(rd32(), '\0');
@@ -156,42 +173,24 @@ static std::shared_ptr<const Overrides> LoadOverrides(const std::string& path, d
     f.read(reinterpret_cast<char*>(w.data()), static_cast<std::streamsize>(w.size() * 4));
     if (!f) return nullptr;
     auto t0 = Clock::now();
-    McBopomofo::SlothRescorer::Options::InitializerOverride q, sc;
-    q.name = name + "_quantized";
-    q.shape = {static_cast<int64_t>(in), static_cast<int64_t>(cols)};
-    q.int8Data.resize(w.size());
-    sc.name = name + "_scale";
-    sc.shape = {static_cast<int64_t>(cols)};
-    sc.floatData.assign(cols, 0.0f);
-    for (uint32_t j = 0; j < cols; ++j) {
-      float amax = 0;
-      for (uint32_t i = 0; i < in; ++i) amax = std::max(amax, std::fabs(w[static_cast<size_t>(i) * cols + j]));
-      sc.floatData[j] = amax / 127.0f;
-    }
-    for (uint32_t i = 0; i < in; ++i) {
-      for (uint32_t j = 0; j < cols; ++j) {
-        size_t k = static_cast<size_t>(i) * cols + j;
-        float s = sc.floatData[j];
-        float v = s > 0 ? std::nearbyint(w[k] / s) : 0.0f;
-        q.int8Data[k] = static_cast<int8_t>(std::min(127.0f, std::max(-127.0f, v)));
-      }
-    }
+    P::QuantizedLinear q;
+    q.name = name;
+    P::QuantizePerChannel(w.data(), in, cols, &q);
     qms += MsSince(t0);
-    out->push_back(std::move(q));
-    out->push_back(std::move(sc));
+    out->tensors.push_back(std::move(q));
   }
-  if (!f || out->size() != 2u * count) return nullptr;
+  if (!f || out->tensors.size() != count) return nullptr;
   if (quantMs) *quantMs = qms;
   // E1 parity check: dump the quantized tensors (name\0 then raw bytes, in order).
   if (const char* dump = getenv("E1_DUMP_QUANT")) {
     std::ofstream d(dump, std::ios::binary);
-    for (const auto& o : *out) {
-      d.write(o.name.c_str(), static_cast<std::streamsize>(o.name.size() + 1));
-      if (!o.int8Data.empty())
-        d.write(reinterpret_cast<const char*>(o.int8Data.data()), static_cast<std::streamsize>(o.int8Data.size()));
-      else
-        d.write(reinterpret_cast<const char*>(o.floatData.data()),
-                static_cast<std::streamsize>(o.floatData.size() * 4));
+    for (const auto& t : out->tensors) {
+      std::string qn = t.name + "_quantized", sn = t.name + "_scale";
+      d.write(qn.c_str(), static_cast<std::streamsize>(qn.size() + 1));
+      d.write(reinterpret_cast<const char*>(t.values.data()), static_cast<std::streamsize>(t.values.size()));
+      d.write(sn.c_str(), static_cast<std::streamsize>(sn.size() + 1));
+      d.write(reinterpret_cast<const char*>(t.scales.data()),
+              static_cast<std::streamsize>(t.scales.size() * 4));
     }
   }
   return out;
@@ -205,14 +204,14 @@ static int RunOverrideCheck(const std::vector<Item>& items, std::shared_ptr<McBo
   r["rss_start_mb"] = RssMB();
   double qms = 0;
   auto t0 = Clock::now();
-  auto ov = LoadOverrides(overridePath, &qms);
+  auto ov = LoadOverrides(overridePath, slothDir + "/onnx/" + onnxFile, &qms);
   if (!ov) {
     fprintf(stderr, "cannot read overrides %s\n", overridePath.c_str());
     return 1;
   }
   r["override_read_quantize_ms"] = Round3(MsSince(t0));
   r["quantize_ms"] = Round3(qms);
-  r["override_tensors"] = ov->size();
+  r["override_tensors"] = 2 * ov->tensors.size();
   McBopomofo::SlothRescorer::Options po;
   po.onnxFile = onnxFile;
   double rss0 = RssMB();
@@ -229,6 +228,8 @@ static int RunOverrideCheck(const std::vector<Item>& items, std::shared_ptr<McBo
   r["override_rss_delta_mb"] = RssMB() - rss0;
   r["plain_ready"] = plain.ready();
   r["override_ready"] = over.ready();
+  r["override_applied"] = over.personalized();
+  r["override_error"] = over.personalizationError();
   if (!plain.ready() || !over.ready()) {
     printf("%s\n", r.dump().c_str());
     return 1;
@@ -303,18 +304,22 @@ static int RunWalkMode(const std::vector<Item>& items, std::shared_ptr<McBopomof
   so.onnxFile = onnxFile;
   if (!overridePath.empty()) {
     double qms = 0;
-    so.overrides = LoadOverrides(overridePath, &qms);
+    so.overrides = LoadOverrides(overridePath, slothDir + "/onnx/" + onnxFile, &qms);
     if (!so.overrides) {
       fprintf(stderr, "cannot read overrides %s\n", overridePath.c_str());
       return 1;
     }
     fprintf(stderr, "overrides %s: %zu tensors, quantize %.0f ms\n", overridePath.c_str(),
-            so.overrides->size(), qms);
+            2 * so.overrides->tensors.size(), qms);
   }
   auto t0 = Clock::now();
   McBopomofo::SlothRescorer model(slothDir, so);
   fprintf(stderr, "R model %s/onnx/%s %s (%.0f ms)\n", slothDir.c_str(), onnxFile.c_str(),
           model.ready() ? "ready" : "FAILED (falls back to plain walk)", MsSince(t0));
+  if (!overridePath.empty() && !model.personalized()) {
+    fprintf(stderr, "personalized weights NOT applied: %s\n", model.personalizationError().c_str());
+    return 1;
+  }
   McBopomofo::NeuralWalkOptions opt;
   opt.alpha = alpha;
   auto makeGrid = [&](const std::vector<std::string>& rs, size_t n, bool* ok) {
