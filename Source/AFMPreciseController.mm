@@ -22,6 +22,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 #import "AFMPreciseController.h"
+#import "AFMPersonalTraining.h"
 #import "McBopomofo-Swift.h"
 
 #import <malloc/malloc.h>
@@ -243,6 +244,15 @@ static double AFMNowSeconds()
     double _loadedAlpha;
     // Mirror of _epoch for the queue, so stale loads / inferences are skipped.
     std::atomic<NSUInteger> _queueEpoch;
+    // Personal-finetune D12 (main thread): factory calibration, the selected
+    // personalized version and its parsed overlay.
+    McBopomofo::PreciseConfig _baseConfig;
+    AFMPersonalVersionRequest *_personalVersion;
+    BOOL _overlayValid;
+    std::vector<int> _overlayBuckets;
+    std::vector<double> _overlayTemperatures;
+    BOOL _overlayFailed;
+    NSUInteger _overlayToken;
 }
 
 @synthesize state = _state;
@@ -256,6 +266,7 @@ static double AFMNowSeconds()
 @synthesize timeoutStreak = _timeoutStreak;
 @synthesize discardedLoadCount = _discardedLoadCount;
 @synthesize lastHeavyQoSClass = _lastHeavyQoSClass;
+@synthesize overlayUpdateCount = _overlayUpdateCount;
 @synthesize startDelay = _startDelay;
 @synthesize totalHeavyMilliseconds = _totalHeavyMilliseconds;
 @synthesize maxHeavyMilliseconds = _maxHeavyMilliseconds;
@@ -482,10 +493,148 @@ static double AFMNowSeconds()
         [self _setState:outcome];
         return;
     }
+    _baseConfig = config;
     _config = config;
     _timeoutStreak = 0;
     os_log_info(AFMPreciseLog(), "precise mode model ready in %.0f ms", ms);
     [self _setState:AFMPreciseStateReady];
+    [self _applyPersonalOverlay];
+}
+
+#pragma mark - Personalized R overlay (personal-finetune D12)
+
+// "key = value" lines: run, bucket_upper, temperatures (# comments).
+static BOOL AFMParsePreciseOverlay(NSString *path, NSString **run, std::vector<int> *buckets, std::vector<double> *temperatures)
+{
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (text == nil) {
+        return NO;
+    }
+    BOOL hasBuckets = NO, hasTemperatures = NO;
+    for (NSString *raw in [text componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (line.length == 0 || [line hasPrefix:@"#"]) {
+            continue;
+        }
+        NSRange eq = [line rangeOfString:@"="];
+        if (eq.location == NSNotFound) {
+            return NO;
+        }
+        NSString *key = [[line substringToIndex:eq.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        NSString *value = [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSString *p in [value componentsSeparatedByString:@" "]) {
+            if (p.length > 0) {
+                [parts addObject:p];
+            }
+        }
+        if ([key isEqualToString:@"run"]) {
+            *run = value;
+        } else if ([key isEqualToString:@"bucket_upper"]) {
+            hasBuckets = YES;
+            buckets->clear();
+            for (NSString *p in parts) {
+                NSScanner *scanner = [NSScanner scannerWithString:p];
+                int v = 0;
+                if (![scanner scanInt:&v] || !scanner.isAtEnd) {
+                    return NO;
+                }
+                buckets->push_back(v);
+            }
+        } else if ([key isEqualToString:@"temperatures"]) {
+            hasTemperatures = YES;
+            temperatures->clear();
+            for (NSString *p in parts) {
+                NSScanner *scanner = [NSScanner scannerWithString:p];
+                double v = 0;
+                if (![scanner scanDouble:&v] || !scanner.isAtEnd || !std::isfinite(v) || v <= 0) {
+                    return NO;
+                }
+                temperatures->push_back(v);
+            }
+        } else {
+            return NO;
+        }
+    }
+    return *run != nil && hasBuckets && hasTemperatures && temperatures->size() == buckets->size() + 1;
+}
+
+- (void)setPersonalVersion:(AFMPersonalVersionRequest *)request
+{
+    NSUInteger token = ++_overlayToken;
+    _personalVersion = request;
+    if (request == nil) {
+        _overlayValid = NO;
+        ++_overlayUpdateCount;
+        [self _applyPersonalOverlay];
+        return;
+    }
+    NSString *path = [request.directory stringByAppendingPathComponent:@"precise-r.conf"];
+    NSString *expectedRun = [request.runIdentifier copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *run = nil;
+        std::vector<int> buckets;
+        std::vector<double> temperatures;
+        BOOL ok = AFMParsePreciseOverlay(path, &run, &buckets, &temperatures) && [run isEqualToString:expectedRun];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (token != self->_overlayToken) {
+                return;  // Another version was selected meanwhile.
+            }
+            self->_overlayValid = ok;
+            self->_overlayBuckets = buckets;
+            self->_overlayTemperatures = temperatures;
+            ++self->_overlayUpdateCount;
+            [self _applyPersonalOverlay];
+        });
+    });
+}
+
+- (NSArray<NSNumber *> *)configTemperaturesForTesting
+{
+    NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+    for (double t : _config.temperatures) {
+        [result addObject:@(t)];
+    }
+    return result;
+}
+
+- (BOOL)isPersonalOverlayApplied
+{
+    return _personalVersion != nil && _overlayValid && !_overlayFailed && _state == AFMPreciseStateReady;
+}
+
+/// Recomputes _config from the factory calibration and the overlay; an
+/// unusable overlay for a personalized R makes precise mode failed.
+- (void)_applyPersonalOverlay
+{
+    BOOL readyOrOverlayFailed = _state == AFMPreciseStateReady || (_state == AFMPreciseStateFailed && _overlayFailed);
+    if (!readyOrOverlayFailed) {
+        return;
+    }
+    if (_personalVersion == nil) {
+        _config = _baseConfig;
+        if (_overlayFailed) {
+            _overlayFailed = NO;
+            [self _setState:AFMPreciseStateReady];
+        }
+        return;
+    }
+    if (_overlayValid && _overlayBuckets == _baseConfig.bucketUpper) {
+        McBopomofo::PreciseConfig config = _baseConfig;
+        config.temperatures = _overlayTemperatures;
+        _config = config;
+        if (_overlayFailed) {
+            _overlayFailed = NO;
+            [self _setState:AFMPreciseStateReady];
+        }
+        return;
+    }
+    if (_state == AFMPreciseStateReady) {
+        _overlayFailed = YES;
+        [self _bumpEpoch];
+        os_log_error(AFMPreciseLog(), "precise mode unavailable for personalized R version %ld: calibration missing or not for this version", (long)_personalVersion.version);
+        [self _setState:AFMPreciseStateFailed];
+    }
 }
 
 - (void)_unload

@@ -196,6 +196,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
         // create an Ort::Env (see Source/Engine/Rescorer/ort_env.h).
         setenv("ORT_DISABLE_TELEMETRY", "1", 1)
 
+        // Personal fine-tuning (personal-finetune D6 / D13): factory-update
+        // handling, cleanup of crashed runs and the eligible count in the
+        // background, and the daily idle-only automatic run.
+        if !isRunningUnderXCTest {
+            AFMPersonalTrainingController.shared.refresh(completion: nil)
+            AFMPersonalTrainingController.shared.startScheduler()
+        }
+
         // Start loading the R-walk model off the main thread; the stock walk is
         // used until it is ready (or forever, if it is missing or fails).
         AFMNeuralSelector.shared.syncWithPreferences()

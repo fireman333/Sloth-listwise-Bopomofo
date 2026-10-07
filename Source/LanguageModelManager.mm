@@ -25,6 +25,7 @@
 #import "LanguageModelManager+Privates.h"
 #import "McBopomofo-Swift.h"
 #import "AFMLearningStore.h"
+#import "AFMPersonalTraining.h"
 
 #include "UTF8Helper.h"
 #include "AssociatedPhrasesV2.h"
@@ -138,6 +139,10 @@ static void LTLoadVariantAnnotatorData()
 {
     [AFMLearningStore.sharedStore clearAllData];
     gUserOverrideModel.clear();
+    // Personal-finetune D13: after the store generation bump, stop using and
+    // delete personalized versions (factory weights, helper killed, then
+    // memory/r-personal/ removed on the store queue).
+    [AFMPersonalTrainingController.sharedController clearAllWithCompletion:nil];
 }
 
 + (void)flushLearningData

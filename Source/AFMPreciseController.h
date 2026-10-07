@@ -46,6 +46,7 @@ typedef NSArray<NSNumber *> *_Nullable (^AFMPreciseHeavyScoreBlock)(
     NSArray<NSString *> *readings, NSArray<NSString *> *candidates);
 
 @class AFMPreciseRequest;
+@class AFMPersonalVersionRequest;
 
 @protocol AFMPreciseRequester <NSObject>
 /// Called on the main thread when the heavy model scored the request and the
@@ -162,6 +163,19 @@ typedef NSArray<NSNumber *> *_Nullable (^AFMPreciseHeavyScoreBlock)(
 @property (readonly, nonatomic) qos_class_t lastHeavyQoSClass;
 /// No request running or queued (tests).
 @property (readonly, nonatomic, getter=isIdle) BOOL idle;
+
+/// Personal-finetune D12: the personalized R version in use (nil = factory
+/// R). Its refitted temperatures (v<N>/precise-r.conf, bound by run id) are
+/// overlaid on models/qwen/precise.conf; a missing / invalid / foreign overlay
+/// makes precise mode failed (R-walk continues) until the selector reports
+/// another version. Main thread; the overlay is read off main.
+- (void)setPersonalVersion:(nullable AFMPersonalVersionRequest *)request;
+/// Whether the current config carries personalized temperatures.
+@property (readonly, nonatomic, getter=isPersonalOverlayApplied) BOOL personalOverlayApplied;
+/// Testing: temperatures of the current config.
+@property (readonly, nonatomic) NSArray<NSNumber *> *configTemperaturesForTesting;
+/// Testing: overlay reads completed.
+@property (readonly, nonatomic) NSUInteger overlayUpdateCount;
 
 #ifdef __cplusplus
 /// The calibration loaded with the current model; valid only while ready.

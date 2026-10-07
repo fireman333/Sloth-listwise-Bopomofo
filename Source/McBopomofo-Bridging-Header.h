@@ -6,6 +6,7 @@
 
 #import "AFMLearningStore.h"
 #import "AFMNeuralSelector.h"
+#import "AFMPersonalTraining.h"
 #import "AFMPreciseController.h"
 #import "KeyHandler.h"
 #import "LanguageModelManager.h"

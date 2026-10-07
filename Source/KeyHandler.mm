@@ -138,6 +138,11 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     // The composing buffer of the last Inputting state built here.
     NSString *_lastComposingText;
     std::optional<AFMCommitSnapshot> _pendingCommitSnapshot;
+    // Personal-finetune D7: the last commit added to the sentence pool, for
+    // the retraction marker (Backspace / Delete right after it).
+    BOOL _hasLastRecordedCommit;
+    double _lastRecordedCommitTime;
+    pid_t _lastRecordedCommitClient;
 }
 
 @synthesize delegate = _delegate;
@@ -525,6 +530,9 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
         return;
     }
     [store appendSentenceRecord:std::move(record)];
+    _hasLastRecordedCommit = YES;
+    _lastRecordedCommitTime = now;
+    _lastRecordedCommitClient = store.clientProcessIdentifier;
 }
 
 - (void)handleForceCommitWithStateCallback:(void (^)(InputState *))stateCallback
@@ -550,7 +558,38 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     return layout;
 }
 
+/// Seconds after a recorded commit within which Backspace / Delete marks it
+/// as retracted (personal-finetune D7).
+static const double kAFMRetractionWindowSeconds = 10.0;
+
 - (BOOL)handleInput:(KeyHandlerInput *)input state:(InputState *)inState stateCallback:(void (^)(InputState *))stateCallback errorCallback:(void (^)(void))errorCallback
+{
+    // Retraction marker (personal-finetune D7): checked before anything else
+    // (also before the early return for keys without text), O(1). Any key
+    // ends the window; Backspace / Delete with an empty buffer for the same
+    // client within 10 s marks the record if the key is passed through to the
+    // application (handled == NO). Key handling itself is unchanged.
+    BOOL retract = NO;
+    double retractTime = 0;
+    if (_hasLastRecordedCommit) {
+        _hasLastRecordedCommit = NO;
+        if ((input.charCode == 8 || input.isDelete) && _bpmfReadingBuffer->isEmpty() && _grid->length() == 0) {
+            AFMLearningStore *store = AFMLearningStore.sharedStore;
+            double elapsed = [store now] - _lastRecordedCommitTime;
+            if (store.recordingEnabled && store.clientProcessIdentifier == _lastRecordedCommitClient && elapsed >= 0 && elapsed <= kAFMRetractionWindowSeconds && ![store isSecureInputEnabled]) {
+                retract = YES;
+                retractTime = _lastRecordedCommitTime;
+            }
+        }
+    }
+    BOOL handled = [self _handleInput:input state:inState stateCallback:stateCallback errorCallback:errorCallback];
+    if (retract && !handled) {
+        [AFMLearningStore.sharedStore appendRetractionForTimestamp:retractTime];
+    }
+    return handled;
+}
+
+- (BOOL)_handleInput:(KeyHandlerInput *)input state:(InputState *)inState stateCallback:(void (^)(InputState *))stateCallback errorCallback:(void (^)(void))errorCallback
 {
     InputState *state = inState;
     UniChar charCode = input.charCode;

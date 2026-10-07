@@ -22,6 +22,8 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 #import "AFMNeuralSelector.h"
+#import "AFMPersonalTraining.h"
+#import "AFMPreciseController.h"
 #import "McBopomofo-Swift.h"
 
 #import <malloc/malloc.h>
@@ -81,41 +83,104 @@ static NSString *AFMModelIdentifier(NSString *modelDirectory)
                      (long long)attributes.fileModificationDate.timeIntervalSince1970];
 }
 
-// Production loader. Runs on the load queue. Returns a heap-allocated scorer
-// wrapping a heap-allocated SlothRescorer, both intentionally never freed, or
-// nullptr with *error set (*notFound = YES when the model directory is missing).
-static McBopomofo::NeuralScorer *AFMLoadSlothScorer(NSString *modelDirectory, NSString **error, BOOL *notFound)
+// A loaded scorer and the model it wraps (nullptr for test scorers). Freed
+// on the load queue when replaced (personal-finetune D11); the scorer in use
+// at process exit is intentionally never freed (no onnxruntime teardown).
+struct AFMLoadedScorer {
+    McBopomofo::NeuralScorer *scorer = nullptr;
+    McBopomofo::SlothRescorer *model = nullptr;
+};
+
+static void AFMFreeLoadedScorer(AFMLoadedScorer loaded)
 {
+    delete loaded.scorer;
+    delete loaded.model;
+}
+
+/// Outcome of one load (load queue -> main).
+@interface AFMNeuralLoadResult : NSObject
+@property (nonatomic) AFMLoadedScorer loaded;
+@property (copy, nonatomic, nullable) NSString *error;
+@property (nonatomic) BOOL notFound;
+/// Personalized weights requested: applied, or why not.
+@property (nonatomic) BOOL personalApplied;
+@property (nonatomic) BOOL personalMismatch;
+@property (copy, nonatomic, nullable) NSString *personalError;
+@end
+
+@implementation AFMNeuralLoadResult
+@synthesize loaded = _loaded;
+@synthesize error = _error;
+@synthesize notFound = _notFound;
+@synthesize personalApplied = _personalApplied;
+@synthesize personalMismatch = _personalMismatch;
+@synthesize personalError = _personalError;
+@end
+
+// The configuration a personalized load is checked against (main thread
+// snapshot; the factory SHA / pack version are read on the load queue).
+struct AFMLoadConfig {
+    double alpha = 0.5;
+    bool acceptYan = false;
+};
+
+// Production loader. Runs on the load queue. Factory weights, or the
+// requested personalized version when its eval_config matches the current
+// configuration (design D11); a personalized problem falls back to the
+// factory weights with personalError set.
+static AFMNeuralLoadResult *AFMLoadSlothScorer(NSString *modelDirectory, AFMPersonalVersionRequest *request, AFMLoadConfig config)
+{
+    AFMNeuralLoadResult *result = [[AFMNeuralLoadResult alloc] init];
     if (modelDirectory == nil) {
-        *error = @"no model directory configured";
-        *notFound = YES;
-        return nullptr;
+        result.error = @"no model directory configured";
+        result.notFound = YES;
+        return result;
     }
     if (&OrtGetApiBase == nullptr) {
-        *error = @"onnxruntime is not available (libonnxruntime.1.dylib missing)";
-        return nullptr;
+        result.error = @"onnxruntime is not available (libonnxruntime.1.dylib missing)";
+        return result;
     }
     BOOL isDirectory = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:modelDirectory isDirectory:&isDirectory] || !isDirectory) {
-        *error = [NSString stringWithFormat:@"model directory missing: %@", modelDirectory];
-        *notFound = YES;
-        return nullptr;
+        result.error = [NSString stringWithFormat:@"model directory missing: %@", modelDirectory];
+        result.notFound = YES;
+        return result;
     }
     const OrtApiBase *apiBase = OrtGetApiBase();
     const OrtApi *api = apiBase != nullptr ? apiBase->GetApi(ORT_API_VERSION) : nullptr;
     if (api == nullptr) {
-        *error = [NSString stringWithFormat:@"onnxruntime does not provide API version %d", ORT_API_VERSION];
-        return nullptr;
+        result.error = [NSString stringWithFormat:@"onnxruntime does not provide API version %d", ORT_API_VERSION];
+        return result;
     }
     Ort::InitApi(api);
 
-    auto *model = new McBopomofo::SlothRescorer(std::string(modelDirectory.fileSystemRepresentation));
-    if (!model->ready()) {
-        delete model;
-        *error = [NSString stringWithFormat:@"failed to load the R model from %@", modelDirectory];
-        return nullptr;
+    McBopomofo::SlothRescorer::Options options;
+    if (request != nil) {
+        options.overridesPath = std::string([request.directory stringByAppendingPathComponent:@"weights.bin"].fileSystemRepresentation);
     }
-    return new McBopomofo::NeuralScorer(McBopomofo::MakeNeuralScorer(model));
+    McBopomofo::SlothRescorer *model = nullptr;
+    try {
+        model = new McBopomofo::SlothRescorer(std::string(modelDirectory.fileSystemRepresentation), options);
+    } catch (...) {
+        model = nullptr;
+    }
+    if (model == nullptr || !model->ready()) {
+        delete model;
+        result.error = [NSString stringWithFormat:@"failed to load the R model from %@", modelDirectory];
+        return result;
+    }
+    if (!options.overridesPath.empty()) {
+        if (model->personalized()) {
+            result.personalApplied = YES;
+        } else {
+            result.personalError = @(model->personalizationError().c_str());
+        }
+    }
+    AFMLoadedScorer loaded;
+    loaded.model = model;
+    loaded.scorer = new McBopomofo::NeuralScorer(McBopomofo::MakeNeuralScorer(model));
+    result.loaded = loaded;
+    return result;
 }
 
 // Wraps a test score block as a NeuralScorer (called on the main thread).
@@ -149,7 +214,8 @@ static McBopomofo::NeuralScorer *AFMMakeBlockScorer(AFMNeuralScoreBlock block)
     });
 }
 
-typedef McBopomofo::NeuralScorer * (^AFMNeuralLoader)(NSString **error, BOOL *notFound);
+typedef AFMNeuralLoadResult * (^AFMNeuralLoader)(AFMPersonalVersionRequest *_Nullable request, AFMLoadConfig config);
+typedef NSDictionary * (^AFMEvalConfigProvider)(double alpha, BOOL acceptYan);
 
 static AFMNeuralSelector *gSharedSelector = nil;
 
@@ -161,13 +227,21 @@ static AFMNeuralSelector *gSharedSelector = nil;
 @implementation AFMNeuralSelector {
     AFMNeuralLoader _loader;
     dispatch_queue_t _loadQueue;
-    // Owned and never freed, so no onnxruntime teardown runs at process exit.
+    // The scorer in use (main thread only). Replaced scorers are freed on the
+    // load queue; the last one is never freed (no onnxruntime teardown).
+    AFMLoadedScorer _loaded;
     McBopomofo::NeuralScorer *_scorer;
     McBopomofo::NeuralScoreCache _cache;
     McBopomofo::NeuralCircuitBreaker _breaker;
     // A cache-miss measurement kept for the end-of-key-event hook (design D1).
     BOOL _hasPendingBreakerMs;
     double _pendingBreakerMs;
+    // Personalization (design D11): key of the weights in use / of the newest
+    // load started (a completion with another key is discarded).
+    NSString *_loadedKey;
+    NSString *_pendingKey;
+    AFMPersonalVersionRequest *_pendingRequest;
+    NSString *_baseIdentifier;
 }
 
 @synthesize state = _state;
@@ -181,6 +255,14 @@ static AFMNeuralSelector *gSharedSelector = nil;
 @synthesize breakerRecordCount = _breakerRecordCount;
 @synthesize precisePayloadCount = _precisePayloadCount;
 @synthesize circuitBreakerDisabledForTesting = _circuitBreakerDisabledForTesting;
+@synthesize personalStatus = _personalStatus;
+@synthesize loadedPersonalVersion = _loadedPersonalVersion;
+@synthesize personalError = _personalError;
+@synthesize loadCount = _loadCount;
+@synthesize discardedLoadCount = _discardedLoadCount;
+@synthesize freedScorerCount = _freedScorerCount;
+@synthesize personalVersionProvider = _personalVersionProvider;
+@synthesize currentEvalConfigProvider = _currentEvalConfigProvider;
 
 + (AFMNeuralSelector *)sharedSelector
 {
@@ -218,20 +300,72 @@ static AFMNeuralSelector *gSharedSelector = nil;
 - (instancetype)initWithModelDirectory:(NSString *)modelDirectory
 {
     NSString *directory = [modelDirectory copy];
-    return [self _initWithModelDirectory:directory loader:^McBopomofo::NeuralScorer *(NSString **error, BOOL *notFound) {
-        return AFMLoadSlothScorer(directory, error, notFound);
+    return [self _initWithModelDirectory:directory loader:^AFMNeuralLoadResult *(AFMPersonalVersionRequest *request, AFMLoadConfig config) {
+        return AFMLoadSlothScorer(directory, request, config);
     }];
 }
 
 - (instancetype)initWithScoreBlockForTesting:(AFMNeuralScoreBlock)scoreBlock loadDelay:(NSTimeInterval)loadDelay
 {
+    return [self initWithScoreBlockForTesting:scoreBlock personalBlockProvider:nil loadDelay:loadDelay];
+}
+
+- (instancetype)initWithScoreBlockForTesting:(AFMNeuralScoreBlock)scoreBlock personalBlockProvider:(AFMPersonalScoreBlockProvider)personalBlockProvider loadDelay:(NSTimeInterval)loadDelay
+{
     AFMNeuralScoreBlock block = [scoreBlock copy];
-    return [self _initWithModelDirectory:nil loader:^McBopomofo::NeuralScorer *(NSString **error, BOOL *notFound) {
+    AFMPersonalScoreBlockProvider provider = [personalBlockProvider copy];
+    return [self _initWithModelDirectory:nil loader:^AFMNeuralLoadResult *(AFMPersonalVersionRequest *request, AFMLoadConfig config) {
         if (loadDelay > 0) {
             [NSThread sleepForTimeInterval:loadDelay];
         }
-        return AFMMakeBlockScorer(block);
+        AFMNeuralLoadResult *result = [[AFMNeuralLoadResult alloc] init];
+        AFMNeuralScoreBlock use = block;
+        if (request != nil) {
+            NSString *error = nil;
+            AFMNeuralScoreBlock personal = nil;
+            if (provider != nil) {
+                personal = provider(request, &error);
+            }
+            if (personal != nil) {
+                use = personal;
+                result.personalApplied = YES;
+            } else {
+                result.personalError = (error != nil ? error : @"no personalized scorer");
+            }
+        }
+        AFMLoadedScorer loaded;
+        loaded.scorer = AFMMakeBlockScorer(use);
+        result.loaded = loaded;
+        return result;
     }];
+}
+
+#pragma mark Loading
+
+- (AFMPersonalVersionRequest *)_desiredRequest
+{
+    if (_personalVersionProvider != nil) {
+        return _personalVersionProvider();
+    }
+    return AFMPersonalTrainingController.sharedController.activeVersionRequest;
+}
+
+// Identifies what a load produces: "f" (factory) or the version, run,
+// generation and the configuration it is checked against.
+static NSString *AFMLoadKey(AFMPersonalVersionRequest *request, AFMLoadConfig config)
+{
+    if (request == nil) {
+        return @"f";
+    }
+    return [NSString stringWithFormat:@"v%ld|%@|%llu|%.17g|%d", (long)request.version, request.runIdentifier, request.generation, config.alpha, config.acceptYan ? 1 : 0];
+}
+
+- (AFMLoadConfig)_currentLoadConfig
+{
+    AFMLoadConfig config;
+    config.alpha = _alpha;
+    config.acceptYan = Preferences.acceptYanReadingForAi;
+    return config;
 }
 
 - (void)syncWithPreferences
@@ -239,6 +373,7 @@ static AFMNeuralSelector *gSharedSelector = nil;
     _enabled = Preferences.neuralWalkEnabled;
     _alpha = Preferences.neuralWalkAlpha;
     [self startLoadingIfNeeded];
+    [self _reloadIfNeeded];
 }
 
 - (void)startLoadingIfNeeded
@@ -247,30 +382,192 @@ static AFMNeuralSelector *gSharedSelector = nil;
         return;
     }
     [self _setState:AFMNeuralSelectorStateLoading];
+    AFMLoadConfig config = [self _currentLoadConfig];
+    [self _startLoad:[self _desiredRequest] config:config];
+}
+
+/// Activation: a different selected version (or configuration) is loaded in
+/// the background while the current scorer stays in use (design D11).
+- (void)_reloadIfNeeded
+{
+    if (_state != AFMNeuralSelectorStateReady) {
+        return;
+    }
+    AFMLoadConfig config = [self _currentLoadConfig];
+    AFMPersonalVersionRequest *request = [self _desiredRequest];
+    NSString *key = AFMLoadKey(request, config);
+    if ([key isEqualToString:(_pendingKey != nil ? _pendingKey : _loadedKey)]) {
+        return;
+    }
+    [self _startLoad:request config:config];
+}
+
+- (void)requestFactoryWeights
+{
+    _personalVersionProvider = nil;
+    AFMLoadConfig config = [self _currentLoadConfig];
+    if (_state == AFMNeuralSelectorStateLoading) {
+        // The load in flight may be personalized: discard it and load the
+        // factory weights after it (serial queue).
+        if (![_pendingKey isEqualToString:@"f"]) {
+            [self _startLoad:nil config:config];
+        }
+        return;
+    }
+    if (_state != AFMNeuralSelectorStateReady) {
+        return;
+    }
+    if ([_loadedKey isEqualToString:@"f"] && _pendingKey == nil) {
+        return;
+    }
+    if (![_pendingKey isEqualToString:@"f"]) {
+        [self _startLoad:nil config:config];
+    }
+}
+
+- (BOOL)isReloading
+{
+    return _pendingKey != nil && _state == AFMNeuralSelectorStateReady;
+}
+
+- (void)_startLoad:(AFMPersonalVersionRequest *)request config:(AFMLoadConfig)config
+{
+    NSString *key = AFMLoadKey(request, config);
+    _pendingKey = key;
+    _pendingRequest = request;
+    ++_loadCount;
+    if (request != nil && _state == AFMNeuralSelectorStateReady) {
+        _personalStatus = AFMPersonalModelStatusLoading;
+    }
     AFMNeuralLoader loader = _loader;
+    NSString *directory = _modelDirectory;
+    AFMEvalConfigProvider configProvider = _currentEvalConfigProvider;
     dispatch_async(_loadQueue, ^{
         auto t0 = std::chrono::steady_clock::now();
-        NSString *error = nil;
-        BOOL notFound = NO;
-        McBopomofo::NeuralScorer *scorer = nullptr;
+        // Configuration binding (design D11): a version evaluated with another
+        // factory model / alpha / reading policy / pack is not loaded.
+        AFMPersonalVersionRequest *effective = request;
+        BOOL mismatch = NO;
+        if (request != nil) {
+            NSDictionary *current = configProvider != nil ? configProvider(config.alpha, config.acceptYan) : AFMCurrentEvalConfig(AFMFactoryModelSHA256(directory), AFMPersonalPackVersion(directory), config.alpha, config.acceptYan);
+            if (!AFMEvalConfigMatches(request.evalConfig, current)) {
+                mismatch = YES;
+                effective = nil;
+            }
+        }
+        AFMNeuralLoadResult *result = nil;
         @try {
-            scorer = loader(&error, &notFound);
+            result = loader(effective, config);
         } @catch (NSException *exception) {
-            scorer = nullptr;
-            error = exception.reason;
+            result = [[AFMNeuralLoadResult alloc] init];
+            result.error = exception.reason;
+        }
+        if (mismatch) {
+            result.personalMismatch = YES;
+            result.personalError = @"version evaluated with another configuration";
         }
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         NSString *identifier = nil;
-        if (scorer != nullptr) {
+        if (result.loaded.scorer != nullptr) {
             // Hand back the transient memory onnxruntime used while loading.
             malloc_zone_pressure_relief(NULL, 0);
-            identifier = AFMModelIdentifier(self->_modelDirectory);
+            identifier = AFMModelIdentifier(directory);
+            if (result.personalApplied) {
+                identifier = [identifier stringByAppendingFormat:@"+p%ld", (long)request.version];
+            }
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_modelIdentifier = identifier;
-            [self _publishScorer:scorer error:error notFound:notFound milliseconds:ms];
+            [self _finishLoad:result key:key request:request identifier:identifier milliseconds:ms];
         });
     });
+}
+
+- (void)_freeOnLoadQueue:(AFMLoadedScorer)loaded
+{
+    if (loaded.scorer == nullptr && loaded.model == nullptr) {
+        return;
+    }
+    ++_freedScorerCount;
+    dispatch_async(_loadQueue, ^{
+        AFMFreeLoadedScorer(loaded);
+    });
+}
+
+- (void)_finishLoad:(AFMNeuralLoadResult *)result key:(NSString *)key request:(AFMPersonalVersionRequest *)request identifier:(NSString *)identifier milliseconds:(double)ms
+{
+    _lastLoadMilliseconds = ms;
+    BOOL stale = ![key isEqualToString:_pendingKey];
+    if (!stale && request != nil && request.generation != AFMPersonalTrainingController.sharedController.generation && _personalVersionProvider == nil) {
+        stale = YES;  // Requested before a clear (design D13).
+    }
+    if (stale || (_state != AFMNeuralSelectorStateLoading && _state != AFMNeuralSelectorStateReady)) {
+        // Superseded (e.g. a clear asked for the factory weights): never
+        // published, freed off main.
+        ++_discardedLoadCount;
+        [self _freeOnLoadQueue:result.loaded];
+        if (!stale) {
+            _pendingKey = nil;
+            _pendingRequest = nil;
+        }
+        return;
+    }
+    _pendingKey = nil;
+    _pendingRequest = nil;
+    if (result.loaded.scorer == nullptr) {
+        if (_state == AFMNeuralSelectorStateLoading) {
+            [self _setState:result.notFound ? AFMNeuralSelectorStateNotFound : AFMNeuralSelectorStateFailed];
+        } else {
+            // A reload failed: stop using R rather than keep weights that
+            // were deselected.
+            AFMLoadedScorer old = _loaded;
+            _loaded = AFMLoadedScorer();
+            _scorer = nullptr;
+            _cache.clear();
+            [self _freeOnLoadQueue:old];
+            [self _setState:AFMNeuralSelectorStateFailed];
+        }
+        os_log_error(AFMNeuralLog(), "R-walk unavailable, using the stock walk: %{public}@", result.error ?: @"unknown error");
+        return;
+    }
+    AFMLoadedScorer old = _loaded;
+    _loaded = result.loaded;
+    _scorer = result.loaded.scorer;
+    _cache.clear();
+    _loadedKey = key;
+    _baseIdentifier = identifier;
+    _modelIdentifier = identifier;
+    if (request == nil) {
+        _personalStatus = AFMPersonalModelStatusFactory;
+        _loadedPersonalVersion = 0;
+        _personalError = nil;
+    } else if (result.personalApplied) {
+        _personalStatus = AFMPersonalModelStatusActive;
+        _loadedPersonalVersion = request.version;
+        _personalError = nil;
+    } else {
+        _personalStatus = result.personalMismatch ? AFMPersonalModelStatusMismatch : AFMPersonalModelStatusUnusable;
+        _loadedPersonalVersion = 0;
+        _personalError = [result.personalError copy];
+        // Logged once: the same key is not loaded again (design D11).
+        os_log_error(AFMNeuralLog(), "personalized version %ld not used, factory weights: %{public}@", (long)request.version, (result.personalError != nil ? result.personalError : @"unknown"));
+    }
+    // The old scorer is only used on main, synchronously; after the swap
+    // nothing references it.
+    [self _freeOnLoadQueue:old];
+    [AFMPreciseController.sharedController setPersonalVersion:(result.personalApplied ? request : nil)];
+    if (_state == AFMNeuralSelectorStateLoading) {
+        [self _setState:AFMNeuralSelectorStateReady];
+        os_log_info(AFMNeuralLog(), "R-walk model ready in %.0f ms", ms);
+    } else {
+        [NSNotificationCenter.defaultCenter postNotificationName:AFMNeuralSelectorStateDidChangeNotification object:self];
+    }
+    // Something else may have been selected while this one loaded.
+    [self _reloadIfNeeded];
+}
+
+- (void)waitForLoadQueueForTesting
+{
+    dispatch_sync(_loadQueue, ^ {});
 }
 
 - (void)_setState:(AFMNeuralSelectorState)state
@@ -286,25 +583,6 @@ static AFMNeuralSelector *gSharedSelector = nil;
             [NSNotificationCenter.defaultCenter postNotificationName:AFMNeuralSelectorStateDidChangeNotification object:self];
         });
     }
-}
-
-- (void)_publishScorer:(McBopomofo::NeuralScorer *)scorer error:(NSString *)error notFound:(BOOL)notFound milliseconds:(double)ms
-{
-    _lastLoadMilliseconds = ms;
-    if (_state != AFMNeuralSelectorStateLoading) {
-        // Never publish over a state that changed meanwhile. The scorer, if
-        // any, is leaked on purpose.
-        return;
-    }
-    if (scorer == nullptr) {
-        [self _setState:notFound ? AFMNeuralSelectorStateNotFound : AFMNeuralSelectorStateFailed];
-        os_log_error(AFMNeuralLog(), "R-walk unavailable, using the stock walk: %{public}@", error ?: @"unknown error");
-        return;
-    }
-    _scorer = scorer;
-    _cache.clear();
-    [self _setState:AFMNeuralSelectorStateReady];
-    os_log_info(AFMNeuralLog(), "R-walk model ready in %.0f ms", ms);
 }
 
 - (Formosa::Gramambular2::ReadingGrid::WalkResult)walkGrid:(Formosa::Gramambular2::ReadingGrid &)grid

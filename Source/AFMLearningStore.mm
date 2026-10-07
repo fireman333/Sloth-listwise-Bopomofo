@@ -500,6 +500,39 @@ static BOOL AFMSystemSecureInputCheck(pid_t clientPID)
     });
 }
 
+- (void)appendRetractionForTimestamp:(double)timestamp
+{
+    if (!_recordingEnabled) {
+        return;
+    }
+    NSString *directory = _directory;
+    NSString *path = self.sentencePoolFilePath;
+    uint64_t generation = _generation.load();
+    dispatch_async(_queue, ^{
+        if (self->_generation.load() != generation) {
+            return;
+        }
+        char line[96];
+        snprintf(line, sizeof(line), "{\"v\":1,\"retract\":%.3f}\n", timestamp);
+        AFMAppendLine(directory, path, std::string(line));
+    });
+}
+
+- (void)performOnStoreQueue:(dispatch_block_t)block
+{
+    uint64_t generation = _generation.load();
+    dispatch_async(_queue, ^{
+        if (self->_generation.load() == generation) {
+            block();
+        }
+    });
+}
+
+- (dispatch_queue_t)storeQueue
+{
+    return _queue;
+}
+
 #pragma mark - Clearing
 
 - (void)clearAllData

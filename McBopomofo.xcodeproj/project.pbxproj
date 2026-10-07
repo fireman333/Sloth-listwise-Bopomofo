@@ -13,6 +13,9 @@
 		AF7B00000000000000000002 /* ReadingPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF7B00000000000000000001 /* ReadingPolicyTests.swift */; };
 		AF7C00000000000000000002 /* PersonalMemoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF7C00000000000000000001 /* PersonalMemoryTests.swift */; };
 		AF7C00000000000000000005 /* AFMLearningStore.mm in Sources */ = {isa = PBXBuildFile; fileRef = AF7C00000000000000000003 /* AFMLearningStore.mm */; };
+		AF7E00000000000000000003 /* AFMPersonalTraining.mm in Sources */ = {isa = PBXBuildFile; fileRef = AF7E00000000000000000001 /* AFMPersonalTraining.mm */; };
+		AF7E00000000000000000006 /* pool_reader.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AF7E00000000000000000004 /* pool_reader.cpp */; };
+		AF7E00000000000000000008 /* PersonalFinetuneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF7E00000000000000000007 /* PersonalFinetuneTests.swift */; };
 		AF7C00000000000000000007 /* PersonalMemoryCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF7C00000000000000000006 /* PersonalMemoryCaptureTests.swift */; };
 		AF7C00000000000000000009 /* LearningNoticePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF7C00000000000000000008 /* LearningNoticePanel.swift */; };
 		AF7A00000000000000000003 /* qwen_rescorer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AF7A00000000000000000002 /* qwen_rescorer.cpp */; };
@@ -158,6 +161,11 @@
 		AF7B00000000000000000001 /* ReadingPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingPolicyTests.swift; sourceTree = "<group>"; };
 		AF7C00000000000000000001 /* PersonalMemoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalMemoryTests.swift; sourceTree = "<group>"; };
 		AF7C00000000000000000003 /* AFMLearningStore.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AFMLearningStore.mm; sourceTree = "<group>"; };
+		AF7E00000000000000000001 /* AFMPersonalTraining.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AFMPersonalTraining.mm; sourceTree = "<group>"; };
+		AF7E00000000000000000002 /* AFMPersonalTraining.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AFMPersonalTraining.h; sourceTree = "<group>"; };
+		AF7E00000000000000000004 /* pool_reader.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = pool_reader.cpp; sourceTree = "<group>"; };
+		AF7E00000000000000000005 /* pool_reader.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = pool_reader.h; sourceTree = "<group>"; };
+		AF7E00000000000000000007 /* PersonalFinetuneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalFinetuneTests.swift; sourceTree = "<group>"; };
 		AF7C00000000000000000004 /* AFMLearningStore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AFMLearningStore.h; sourceTree = "<group>"; };
 		AF7C00000000000000000006 /* PersonalMemoryCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalMemoryCaptureTests.swift; sourceTree = "<group>"; };
 		AF7C00000000000000000008 /* LearningNoticePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LearningNoticePanel.swift; sourceTree = "<group>"; };
@@ -404,6 +412,8 @@
 				AF7B00000000000000000006 /* AFMPreciseController.h */,
 				AF7C00000000000000000003 /* AFMLearningStore.mm */,
 				AF7C00000000000000000004 /* AFMLearningStore.h */,
+				AF7E00000000000000000001 /* AFMPersonalTraining.mm */,
+				AF7E00000000000000000002 /* AFMPersonalTraining.h */,
 				AF7C00000000000000000008 /* LearningNoticePanel.swift */,
 				D43FC40A2B23788400ED5A1C /* InputMacro.swift */,
 				D4CB1A5A2B3891FB006EA984 /* DictionaryService.swift */,
@@ -475,6 +485,8 @@
 				AF7D00000000000000000003 /* onnx_initializers.h */,
 				AF7D00000000000000000002 /* personal_weights.cpp */,
 				AF7D00000000000000000001 /* personal_weights.h */,
+				AF7E00000000000000000004 /* pool_reader.cpp */,
+				AF7E00000000000000000005 /* pool_reader.h */,
 			);
 			path = Personalize;
 			sourceTree = "<group>";
@@ -623,6 +635,7 @@
 				AF7B00000000000000000001 /* ReadingPolicyTests.swift */,
 				AF7C00000000000000000001 /* PersonalMemoryTests.swift */,
 				AF7C00000000000000000006 /* PersonalMemoryCaptureTests.swift */,
+				AF7E00000000000000000007 /* PersonalFinetuneTests.swift */,
 				D485D3B82796A8A000657FF3 /* PreferencesTests.swift */,
 				D485D3BF2796CE3200657FF3 /* VersionUpdateTests.swift */,
 				D449AD5E2B393C00000C5812 /* InputMacroTests.swift */,
@@ -896,6 +909,8 @@
 				AF5E0000000000000000000B /* AFMNeuralSelector.mm in Sources */,
 				AF7B00000000000000000008 /* AFMPreciseController.mm in Sources */,
 				AF7C00000000000000000005 /* AFMLearningStore.mm in Sources */,
+				AF7E00000000000000000003 /* AFMPersonalTraining.mm in Sources */,
+				AF7E00000000000000000006 /* pool_reader.cpp in Sources */,
 				AF7C00000000000000000009 /* LearningNoticePanel.swift in Sources */,
 				AF5E0000000000000000000C /* sloth_rescorer.cpp in Sources */,
 				AF7D00000000000000000005 /* personal_weights.cpp in Sources */,
@@ -944,6 +959,7 @@
 				AF7B00000000000000000002 /* ReadingPolicyTests.swift in Sources */,
 				AF7C00000000000000000002 /* PersonalMemoryTests.swift in Sources */,
 				AF7C00000000000000000007 /* PersonalMemoryCaptureTests.swift in Sources */,
+				AF7E00000000000000000008 /* PersonalFinetuneTests.swift in Sources */,
 				D436E23F2CD20BA700C6155D /* AssociatedPhrasesTests.swift in Sources */,
 				D449AD5F2B393C00000C5812 /* InputMacroTests.swift in Sources */,
 				D4C2A9872B4309D700113711 /* UTF8HelperTest.mm in Sources */,
@@ -1267,6 +1283,7 @@
 					"\"$(SRCROOT)/../vendor/onnxruntime/onnxruntime-osx-arm64-1.30.0/include\"",
 					"\"$(SRCROOT)/../vendor/llama.cpp/include\"",
 					"\"$(SRCROOT)/../vendor/llama.cpp/ggml/include\"",
+					"\"$(SRCROOT)/../vendor/llama.cpp/vendor\"",
 				);
 				INFOPLIST_FILE = "Source/McBopomofo-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1353,6 +1370,7 @@
 					"\"$(SRCROOT)/../vendor/onnxruntime/onnxruntime-osx-arm64-1.30.0/include\"",
 					"\"$(SRCROOT)/../vendor/llama.cpp/include\"",
 					"\"$(SRCROOT)/../vendor/llama.cpp/ggml/include\"",
+					"\"$(SRCROOT)/../vendor/llama.cpp/vendor\"",
 				);
 				INFOPLIST_FILE = "Source/McBopomofo-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (

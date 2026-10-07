@@ -52,11 +52,32 @@ struct AFMPrecisePayload {
 /// Readings above this length always use the stock walk (design D10).
 extern const NSUInteger kAFMNeuralMaxSyllables;
 
+@class AFMPersonalVersionRequest;
+
+/// Personalized weights of the loaded R (personal-finetune design D11).
+typedef NS_ENUM(NSInteger, AFMPersonalModelStatus) {
+    /// No personalized version selected: factory weights.
+    AFMPersonalModelStatusFactory = 0,
+    /// A personalized version is being loaded in the background.
+    AFMPersonalModelStatusLoading,
+    /// The selected version is in use (loadedPersonalVersion).
+    AFMPersonalModelStatusActive,
+    /// The selected version could not be loaded: factory weights.
+    AFMPersonalModelStatusUnusable,
+    /// The selected version was evaluated with another configuration
+    /// (factory model, alpha, reading policy, pack): factory weights.
+    AFMPersonalModelStatusMismatch,
+};
+
 /// Test-only scorer: readings (one syllable each) and, per position, the
 /// characters the grid can place there -> per position {character: log p}.
 /// Return nil or an empty array to simulate an inference failure.
 typedef NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable (^AFMNeuralScoreBlock)(
     NSArray<NSString *> *readings, NSArray<NSArray<NSString *> *> *charsAtPositions);
+
+/// Test-only: the score block for a personalized version (nil = load failure,
+/// *error set). Runs on the load queue.
+typedef AFMNeuralScoreBlock _Nullable (^AFMPersonalScoreBlockProvider)(AFMPersonalVersionRequest *request, NSString *_Nullable *_Nonnull error);
 
 @interface AFMNeuralSelector : NSObject
 
@@ -75,6 +96,11 @@ typedef NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable (^AFMNeuralSc
 /// selector becomes ready and scores with scoreBlock.
 - (instancetype)initWithScoreBlockForTesting:(AFMNeuralScoreBlock)scoreBlock
                                    loadDelay:(NSTimeInterval)loadDelay;
+/// Fake model with personalized versions: factory loads use scoreBlock,
+/// personalized loads personalBlockProvider (both after loadDelay).
+- (instancetype)initWithScoreBlockForTesting:(AFMNeuralScoreBlock)scoreBlock
+                       personalBlockProvider:(nullable AFMPersonalScoreBlockProvider)personalBlockProvider
+                                   loadDelay:(NSTimeInterval)loadDelay;
 - (instancetype)init NS_UNAVAILABLE;
 
 /// Reads AFMNeuralWalkEnabled / AFMNeuralWalkAlpha and, if enabled, starts
@@ -85,6 +111,35 @@ typedef NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable (^AFMNeuralSc
 - (void)startLoadingIfNeeded;
 
 @property (readonly, nonatomic) AFMNeuralSelectorState state;
+
+// MARK: Personalized weights (personal-finetune design D11)
+/// The version to use; nil = AFMPersonalTrainingController.shared's
+/// activeVersionRequest. Read at every syncWithPreferences (activation): if it
+/// differs from the loaded one, a new scorer is loaded in the background
+/// while the current one stays in use, then swapped in on main (the old one
+/// is freed on the load queue).
+@property (copy, nonatomic, nullable) AFMPersonalVersionRequest *_Nullable (^personalVersionProvider)(void);
+/// The current evaluation configuration for a load (alpha, reading policy);
+/// runs on the load queue. nil = factory SHA-256 and pack version read from
+/// modelDirectory (tests replace it).
+@property (copy, nonatomic, nullable) NSDictionary *_Nonnull (^currentEvalConfigProvider)(double alpha, BOOL acceptYan);
+/// Clearing (design D13 step 2): factory weights at once — a personalized
+/// scorer in use is replaced in the background, and every personalized load
+/// started before is discarded on completion.
+- (void)requestFactoryWeights;
+@property (readonly, nonatomic) AFMPersonalModelStatus personalStatus;
+/// Version of the loaded personalized weights; 0 = factory.
+@property (readonly, nonatomic) NSInteger loadedPersonalVersion;
+/// Why the selected version is not used (unusable / mismatch), else nil.
+@property (readonly, nonatomic, nullable) NSString *personalError;
+/// Testing: loads started, loads discarded on completion, scorers freed.
+@property (readonly, nonatomic) NSUInteger loadCount;
+@property (readonly, nonatomic) NSUInteger discardedLoadCount;
+@property (readonly, nonatomic) NSUInteger freedScorerCount;
+/// Testing: whether a background (re)load is in flight.
+@property (readonly, nonatomic, getter=isReloading) BOOL reloading;
+/// Testing: waits until the load queue is idle.
+- (void)waitForLoadQueueForTesting;
 @property (assign, nonatomic) BOOL enabled;
 @property (assign, nonatomic) double alpha;
 @property (readonly, nonatomic, nullable) NSString *modelDirectory;
