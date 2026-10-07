@@ -28,7 +28,7 @@ rules:
     - "Never allow a requirement that modifies already-committed text or sends typed text off the device."
   design:
     - "For any non-trivial technical choice, surface the alternatives and use AskUserQuestion before committing it to the design."
-    - "Engine changes must keep the default (alpha=0 / model absent) behavior identical to upstream McBopomofo."
+    - "Engine changes must keep the default (alpha=0 / model absent) behavior identical to upstream McBopomofo, except for entries removed by the reading-policy capability."
   tasks:
     - "Never run `git commit` automatically — commits go through the auto-git skill or explicit user confirmation."
     - "Every engine task needs gtest coverage; every App task needs an xcodebuild success check."
