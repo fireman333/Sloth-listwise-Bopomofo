@@ -14,6 +14,7 @@
 #ifndef SOURCE_ENGINE_RESCORER_SLOTH_RESCORER_H_
 #define SOURCE_ENGINE_RESCORER_SLOTH_RESCORER_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,18 @@ class SlothRescorer : public Rescorer {
     int intraOpThreads = 1;
     // File name under <modelDir>/onnx/.
     std::string onnxFile = "model_quantized.onnx";
+    // Initializers that replace same-name initializers of the ONNX file at
+    // session creation (OrtApi::AddInitializer); the file is not modified.
+    // Used to load personalized int8 weights (val_N_quantized / val_N_scale).
+    // Buffers are shared with the rescorer, which keeps them alive for the
+    // session's lifetime. nullptr = the file's own weights.
+    struct InitializerOverride {
+      std::string name;
+      std::vector<int64_t> shape;
+      std::vector<int8_t> int8Data;  // used when non-empty
+      std::vector<float> floatData;  // used otherwise
+    };
+    std::shared_ptr<const std::vector<InitializerOverride>> overrides;
   };
 
   // Never throws. On any load failure ready() is false and score() returns {}.

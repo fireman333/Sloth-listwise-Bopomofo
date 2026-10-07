@@ -195,6 +195,10 @@ constexpr double kMissingCharLogp = -30.0;  // same as the Python reference.
 
 struct SlothRescorer::Impl {
   Ort::Env env = MakeOfflineOrtEnv("SlothRescorer");
+  // Override buffers and their OrtValues must outlive the session (declared
+  // before it, so destroyed after it).
+  std::shared_ptr<const std::vector<SlothRescorer::Options::InitializerOverride>> overrides;
+  std::vector<Ort::Value> overrideValues;
   std::unique_ptr<Ort::Session> session;
   std::unordered_map<std::string, int64_t> sylId;   // syllable -> input id
   std::unordered_map<std::string, int64_t> charId;  // char -> output id
@@ -259,6 +263,23 @@ struct SlothRescorer::Impl {
     so.DisableCpuMemArena();
     std::string onnxPath = dir + "/onnx/" + opt.onnxFile;
     if (!std::ifstream(onnxPath)) throw std::runtime_error("cannot open " + onnxPath);
+    if (opt.overrides) {
+      overrides = opt.overrides;
+      Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+      overrideValues.reserve(overrides->size());
+      for (const auto& o : *overrides) {
+        if (!o.int8Data.empty()) {
+          overrideValues.push_back(Ort::Value::CreateTensor<int8_t>(
+              mem, const_cast<int8_t*>(o.int8Data.data()), o.int8Data.size(), o.shape.data(),
+              o.shape.size()));
+        } else {
+          overrideValues.push_back(Ort::Value::CreateTensor<float>(
+              mem, const_cast<float*>(o.floatData.data()), o.floatData.size(), o.shape.data(),
+              o.shape.size()));
+        }
+        so.AddInitializer(o.name.c_str(), overrideValues.back());
+      }
+    }
     session = std::make_unique<Ort::Session>(env, onnxPath.c_str(), so);
     ready = true;
   }

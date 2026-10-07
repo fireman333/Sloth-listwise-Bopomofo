@@ -12,6 +12,7 @@
 //                       [--electra-onnx model_int8.onnx]
 //                       [--parallel] [--latency 1,2,4]
 //                       [--walk-mode --alpha 1 [--sloth-onnx f] [--walk-reps n]]
+//                       [--override-weights merged.bin [--override-check n]]
 // Outputs (in out-dir): result_cpp_{A,D,B,DB,E,DE}<tag>.jsonl, cpp_nbest.jsonl
 //   --nbest   take candidates from an existing nbest jsonl (e.g. out/nbest_lex.jsonl)
 //             instead of walkNBest (no grid; A = nbest[0]); use with --tag.
@@ -27,6 +28,13 @@
 //             times n repetitions of (a) the full sentence and (b) every keystroke prefix,
 //             p50/p95 overall and by buffer length (<=8, 9-16, >16), plus load average,
 //             into lat_cpp_rwalk_a<alpha><tag>.json.
+//   --override-weights  (E1, personal-finetune task 1.1) read merged fp32 linear weights
+//             (AFMMW001 file from train/personalize/e1/export_weights.py), quantize them with
+//             the shipped per-channel rule (scale = max|w|/127 per output column, zp 0, rint,
+//             clip +-127) and override val_N_quantized / val_N_scale of --sloth-onnx at session
+//             creation (OrtApi::AddInitializer). Applies to --walk-mode. With --override-check n
+//             instead: load a plain and an overridden session, compare charLogProbs on the first
+//             n items (bit-identical count, max |diff|), and print load times and RSS as JSON.
 //   --precise-mode  precise mode (precise_walk.h): R-walk N-best (--k, --alpha) + calibrated
 //             gate + R/Qwen fusion, with --sloth-dir as the R export and --qwen as the heavy
 //             model. --precise-config f loads PreciseConfig (key = value); without it the
@@ -70,7 +78,10 @@
 #endif
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <mach/mach.h>
+#include <sys/resource.h>
 
 using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
@@ -98,6 +109,169 @@ struct Item {
   std::vector<std::string> reading;
 };
 
+
+#ifdef RESCORER_BENCH_WITH_SLOTH
+using Overrides = std::vector<McBopomofo::SlothRescorer::Options::InitializerOverride>;
+
+static double RssMB() {
+  mach_task_basic_info info;
+  mach_msg_type_number_t n = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &n) !=
+      KERN_SUCCESS)
+    return -1;
+  return info.resident_size / 1048576.0;
+}
+
+static double MaxRssMB() {
+  rusage ru{};
+  getrusage(RUSAGE_SELF, &ru);
+  return ru.ru_maxrss / 1048576.0;  // bytes on macOS
+}
+
+// Reads an AFMMW001 file (merged fp32 [in,out] per ONNX base name) and quantizes
+// each tensor per output column: scale = max|w[:,j]| / 127 (fp32), q = clip(rint(w / scale)).
+static std::shared_ptr<const Overrides> LoadOverrides(const std::string& path, double* quantMs) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return nullptr;
+  char magic[8];
+  f.read(magic, 8);
+  if (!f || std::memcmp(magic, "AFMMW001", 8) != 0) return nullptr;
+  auto rd32 = [&]() {
+    uint32_t v = 0;
+    f.read(reinterpret_cast<char*>(&v), 4);
+    return v;
+  };
+  uint32_t count = rd32();
+  auto out = std::make_shared<Overrides>();
+  double qms = 0;
+  for (uint32_t t = 0; t < count && f; ++t) {
+    std::string name(rd32(), '\0');
+    f.read(name.data(), static_cast<std::streamsize>(name.size()));
+    uint32_t in = rd32(), cols = rd32();
+    std::vector<float> w(static_cast<size_t>(in) * cols);
+    f.read(reinterpret_cast<char*>(w.data()), static_cast<std::streamsize>(w.size() * 4));
+    if (!f) return nullptr;
+    auto t0 = Clock::now();
+    McBopomofo::SlothRescorer::Options::InitializerOverride q, sc;
+    q.name = name + "_quantized";
+    q.shape = {static_cast<int64_t>(in), static_cast<int64_t>(cols)};
+    q.int8Data.resize(w.size());
+    sc.name = name + "_scale";
+    sc.shape = {static_cast<int64_t>(cols)};
+    sc.floatData.assign(cols, 0.0f);
+    for (uint32_t j = 0; j < cols; ++j) {
+      float amax = 0;
+      for (uint32_t i = 0; i < in; ++i) amax = std::max(amax, std::fabs(w[static_cast<size_t>(i) * cols + j]));
+      sc.floatData[j] = amax / 127.0f;
+    }
+    for (uint32_t i = 0; i < in; ++i) {
+      for (uint32_t j = 0; j < cols; ++j) {
+        size_t k = static_cast<size_t>(i) * cols + j;
+        float s = sc.floatData[j];
+        float v = s > 0 ? std::nearbyint(w[k] / s) : 0.0f;
+        q.int8Data[k] = static_cast<int8_t>(std::min(127.0f, std::max(-127.0f, v)));
+      }
+    }
+    qms += MsSince(t0);
+    out->push_back(std::move(q));
+    out->push_back(std::move(sc));
+  }
+  if (!f || out->size() != 2u * count) return nullptr;
+  if (quantMs) *quantMs = qms;
+  // E1 parity check: dump the quantized tensors (name\0 then raw bytes, in order).
+  if (const char* dump = getenv("E1_DUMP_QUANT")) {
+    std::ofstream d(dump, std::ios::binary);
+    for (const auto& o : *out) {
+      d.write(o.name.c_str(), static_cast<std::streamsize>(o.name.size() + 1));
+      if (!o.int8Data.empty())
+        d.write(reinterpret_cast<const char*>(o.int8Data.data()), static_cast<std::streamsize>(o.int8Data.size()));
+      else
+        d.write(reinterpret_cast<const char*>(o.floatData.data()),
+                static_cast<std::streamsize>(o.floatData.size() * 4));
+    }
+  }
+  return out;
+}
+
+// Compares charLogProbs of a plain and an overridden session on the first n items.
+static int RunOverrideCheck(const std::vector<Item>& items, std::shared_ptr<McBopomofo::McBopomofoLM> lm,
+                            const std::string& slothDir, const std::string& onnxFile,
+                            const std::string& overridePath, size_t n) {
+  json r;
+  r["rss_start_mb"] = RssMB();
+  double qms = 0;
+  auto t0 = Clock::now();
+  auto ov = LoadOverrides(overridePath, &qms);
+  if (!ov) {
+    fprintf(stderr, "cannot read overrides %s\n", overridePath.c_str());
+    return 1;
+  }
+  r["override_read_quantize_ms"] = Round3(MsSince(t0));
+  r["quantize_ms"] = Round3(qms);
+  r["override_tensors"] = ov->size();
+  McBopomofo::SlothRescorer::Options po;
+  po.onnxFile = onnxFile;
+  double rss0 = RssMB();
+  t0 = Clock::now();
+  McBopomofo::SlothRescorer plain(slothDir, po);
+  r["plain_load_ms"] = Round3(MsSince(t0));
+  r["plain_rss_delta_mb"] = RssMB() - rss0;
+  McBopomofo::SlothRescorer::Options oo = po;
+  oo.overrides = ov;
+  rss0 = RssMB();
+  t0 = Clock::now();
+  McBopomofo::SlothRescorer over(slothDir, oo);
+  r["override_load_ms"] = Round3(MsSince(t0));
+  r["override_rss_delta_mb"] = RssMB() - rss0;
+  r["plain_ready"] = plain.ready();
+  r["override_ready"] = over.ready();
+  if (!plain.ready() || !over.ready()) {
+    printf("%s\n", r.dump().c_str());
+    return 1;
+  }
+  size_t identical = 0, compared = 0, entries = 0;
+  double maxDiff = 0;
+  for (size_t i = 0; i < std::min(n, items.size()); ++i) {
+    auto g = std::make_unique<ReadingGrid>(lm);
+    bool ok = true;
+    for (const auto& rd : items[i].reading) ok = g->insertReading(rd) && ok;
+    if (!ok) continue;
+    auto extra = g->charsAtPositions();
+    auto a = plain.charLogProbs(g->readings(), &extra);
+    auto b = over.charLogProbs(g->readings(), &extra);
+    ++compared;
+    bool same = a.size() == b.size();
+    for (size_t t = 0; same && t < a.size(); ++t) {
+      if (a[t].size() != b[t].size()) { same = false; break; }
+      for (const auto& kv : a[t]) {
+        auto it = b[t].find(kv.first);
+        if (it == b[t].end()) { same = false; break; }
+        ++entries;
+        double d = std::fabs(it->second - kv.second);
+        maxDiff = std::max(maxDiff, d);
+        if (d != 0) same = false;
+      }
+    }
+    // keep scanning entries for maxDiff even when not identical
+    if (!same) {
+      for (size_t t = 0; t < std::min(a.size(), b.size()); ++t)
+        for (const auto& kv : a[t]) {
+          auto it = b[t].find(kv.first);
+          if (it != b[t].end()) maxDiff = std::max(maxDiff, std::fabs(it->second - kv.second));
+        }
+    }
+    identical += same;
+  }
+  r["compared"] = compared;
+  r["identical_tables"] = identical;
+  r["max_abs_logp_diff"] = maxDiff;
+  r["rss_end_mb"] = RssMB();
+  r["max_rss_mb"] = MaxRssMB();
+  printf("%s\n", r.dump().c_str());
+  return 0;
+}
+#endif
+
 #ifdef RESCORER_BENCH_WITH_SLOTH
 static std::string Uptime() {
   std::string out;
@@ -118,10 +292,21 @@ static std::string AlphaTag(double alpha) {
 
 static int RunWalkMode(const std::vector<Item>& items, std::shared_ptr<McBopomofo::McBopomofoLM> lm,
                        const std::string& slothDir, const std::string& onnxFile, int threads,
-                       double alpha, int reps, const std::string& outDir, const std::string& tag) {
+                       double alpha, int reps, const std::string& outDir, const std::string& tag,
+                       const std::string& overridePath) {
   McBopomofo::SlothRescorer::Options so;
   so.intraOpThreads = threads;
   so.onnxFile = onnxFile;
+  if (!overridePath.empty()) {
+    double qms = 0;
+    so.overrides = LoadOverrides(overridePath, &qms);
+    if (!so.overrides) {
+      fprintf(stderr, "cannot read overrides %s\n", overridePath.c_str());
+      return 1;
+    }
+    fprintf(stderr, "overrides %s: %zu tensors, quantize %.0f ms\n", overridePath.c_str(),
+            so.overrides->size(), qms);
+  }
   auto t0 = Clock::now();
   McBopomofo::SlothRescorer model(slothDir, so);
   fprintf(stderr, "R model %s/onnx/%s %s (%.0f ms)\n", slothDir.c_str(), onnxFile.c_str(),
@@ -448,6 +633,8 @@ int main(int argc, char** argv) {
   bool walkMode = false;
   double alpha = 1.0;
   int walkReps = 0;
+  std::string overridePath;
+  size_t overrideCheck = 0;
   bool preciseMode = false, preciseDump = false;
   std::string preciseConfig;
   int preciseReps = 0;
@@ -489,6 +676,8 @@ int main(int argc, char** argv) {
     else if (a == "--precise-reps") preciseReps = std::stoi(next());
     else if (a == "--sloth-onnx") slothOnnx = next();
     else if (a == "--walk-reps") walkReps = std::stoi(next());
+    else if (a == "--override-weights") overridePath = next();
+    else if (a == "--override-check") overrideCheck = std::stoul(next());
     else {
       fprintf(stderr, "unknown arg %s\n", a.c_str());
       return 2;
@@ -548,7 +737,10 @@ int main(int argc, char** argv) {
   // ---- R-walk mode
   if (walkMode) {
 #ifdef RESCORER_BENCH_WITH_SLOTH
-    return RunWalkMode(items, lm, slothDir, slothOnnx, slothThreads, alpha, walkReps, outDir, tag);
+    if (!overridePath.empty() && overrideCheck > 0)
+      return RunOverrideCheck(items, lm, slothDir, slothOnnx, overridePath, overrideCheck);
+    return RunWalkMode(items, lm, slothDir, slothOnnx, slothThreads, alpha, walkReps, outDir, tag,
+                       overridePath);
 #else
     fprintf(stderr, "walk mode needs the Sloth backend\n");
     return 2;
