@@ -97,6 +97,7 @@
 
 - [ ] 9.1 `/simplify` over the diff; full Debug `xcodebuild test` + engine and Rescorer `ctest` + helper tests pass.
 - [ ] 9.2 `/opsx:verify` green on completeness / correctness / coherence (report `VERIFY.md`).
-- [ ] 9.3 After `personal-memory` is archived: add a MODIFIED delta `specs/personal-memory/spec.md` restating "Clearing learning data" in full (all scenarios) so it also deletes personalized versions and returns to the factory model (design D13); `openspec validate personal-finetune --strict` passes. Do not archive this change before 9.2 and 9.3.
+- [x] 9.3 After `personal-memory` is archived: add a MODIFIED delta `specs/personal-memory/spec.md` restating "Clearing learning data" in full (all scenarios) so it also deletes personalized versions and returns to the factory model (design D13); `openspec validate personal-finetune --strict` passes. Do not archive this change before 9.2 and 9.3.
+  - Done 2026-10-08 (S5): `specs/personal-memory/spec.md` MODIFIED "Clearing learning data" restated in full: deletes personalized versions + training status too, returns to the factory weights from the next activation, pending training results / personalized loads are not used after the clear, "models" narrowed to "the factory model files"; all 3 scenarios of the main requirement kept verbatim (scenario-title diff vs `openspec/specs/personal-memory/spec.md`: 0 removed) + new "Clear with a personalized version in use" (implemented and tested in 5.7). Scenario-title diff of every other MODIFIED delta (preferences, model-loading, precise-mode) vs the current main specs: additions only, 0 dropped. `openspec validate personal-finetune --strict` → valid.
 </content>
 </invoke>
