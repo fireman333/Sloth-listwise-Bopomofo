@@ -1629,3 +1629,202 @@ class PersonalizationPreferencesTests: PersonalTrainingTestCase {
         window.contentView = nil
     }
 }
+
+// MARK: - Codex review 2026-10-08 (VERIFY.md "Codex review 2026-10-08")
+
+class CodexReviewFixTests: PersonalTrainingTestCase {
+
+    func mode(_ path: String) -> Int {
+        var st = stat()
+        return lstat(path, &st) == 0 ? Int(st.st_mode & 0o7777) : -1
+    }
+
+    func versionDirectories() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: personal)) ?? []).filter { $0.hasPrefix("v") }.sorted()
+    }
+
+    var clearMarker: String { (memoryDirectory as NSString).appendingPathComponent("r-personal.clearing") }
+
+    /// A link target outside the memory folder. It lives in the (watcher-excluded) models folder: a link
+    /// from memory/ to a target elsewhere in the watched root would make the user-phrase watcher, which
+    /// resolves links, reload user phrases in later tests.
+    func outsideFile(_ name: String) throws -> String {
+        let dir = UserPhraseLocationHelper.modelsDirectory
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = (dir as NSString).appendingPathComponent("codex-review-outside-\(name)")
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        return path
+    }
+
+    /// Finding 1: a clear whose deletion fails never reports success, keeps the factory model, and a relaunch
+    /// does not read the surviving manifest back; the retry finishes once the folder is deletable.
+    func testFailedClearStaysFactoryAcrossRelaunchAndRetries() throws {
+        writePool(1100)
+        refresh()
+        XCTAssertEqual(try startAndWait(), "adopted")
+        XCTAssertEqual(controller.activeVersion, 1)
+        controller.waitUntilIdleForTesting()
+        controller.clearRetryInterval = 0.3
+        XCTAssertEqual(chmod(personal, 0o500), 0)  // r-personal/ and its files cannot be deleted
+        defer { chmod(personal, 0o700) }
+        var cleared = false
+        controller.clearAll { cleared = true }
+        waitUntil { self.controller.clearIncomplete }
+        XCTAssertTrue(controller.clearIncomplete)
+        XCTAssertFalse(cleared, "an incomplete clear is never reported as done")
+        XCTAssertTrue(exists("manifest.json"), "precondition: the deletion really failed")
+        XCTAssertNil(controller.activeVersionRequest())
+        XCTAssertEqual(controller.startManualRun(), .clearing)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: clearMarker))
+        // Relaunch on the same folders: the old version is not resurrected.
+        let relaunched = AFMPersonalTrainingController(
+            memoryDirectory: memoryDirectory, modelDirectory: modelDirectory, helperPath: nil)
+        relaunched.clearRetryInterval = 0.3
+        XCTAssertNil(relaunched.activeVersion)
+        XCTAssertNil(relaunched.activeVersionRequest())
+        XCTAssertTrue(relaunched.clearIncomplete)
+        // Deletable again: the retries finish the clear.
+        chmod(personal, 0o700)
+        waitUntil { cleared && !relaunched.clearIncomplete }
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(controller.clearIncomplete)
+        XCTAssertFalse(relaunched.clearIncomplete)
+        relaunched.waitUntilIdleForTesting()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: personal))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: clearMarker))
+        let again = AFMPersonalTrainingController(
+            memoryDirectory: memoryDirectory, modelDirectory: modelDirectory, helperPath: nil)
+        XCTAssertFalse(again.clearIncomplete)
+    }
+
+    /// Finding 2: an existing 0644 pool is narrowed to 0600 and the memory folder to 0700 on the next append.
+    func testPoolFilePermissionsNarrowed() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: memoryDirectory, withIntermediateDirectories: true)
+        chmod(memoryDirectory, 0o755)
+        fm.createFile(atPath: poolFile, contents: Data("{\"v\":1,\"retract\":1.000}\n".utf8))
+        chmod(poolFile, 0o644)
+        store.appendRetraction(forTimestamp: now)
+        store.waitUntilIdleForTesting()
+        XCTAssertEqual(mode(poolFile), 0o600)
+        XCTAssertEqual(mode(memoryDirectory), 0o700)
+        let text = try String(contentsOfFile: poolFile, encoding: .utf8)
+        XCTAssertEqual(text.split(separator: "\n").count, 2, "the record was still appended")
+    }
+
+    /// Finding 2: a symlinked pool is refused; nothing is written outside the memory folder.
+    func testPoolSymlinkRefused() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: memoryDirectory, withIntermediateDirectories: true)
+        let outside = try outsideFile("pool.jsonl")
+        addTeardownBlock { [poolFile] in try? FileManager.default.removeItem(atPath: poolFile) }
+        fm.createFile(atPath: outside, contents: Data())
+        chmod(outside, 0o644)
+        try fm.createSymbolicLink(atPath: poolFile, withDestinationPath: outside)
+        store.appendRetraction(forTimestamp: now)
+        store.waitUntilIdleForTesting()
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: outside)).count, 0, "nothing written through the link")
+        XCTAssertEqual(mode(outside), 0o644, "the link target's mode is untouched")
+        XCTAssertEqual(try fm.destinationOfSymbolicLink(atPath: poolFile), outside)
+    }
+
+    /// Finding 2: the memory file and the personalization manifest are never written through a planted
+    /// `.tmp` symlink, and end up 0600 in 0700 folders.
+    func testMemoryAndManifestWritesDoNotFollowSymlinks() throws {
+        let fm = FileManager.default
+        let outside = try outsideFile("memory.txt")
+        addTeardownBlock { [memoryFile, personal] in
+            try? FileManager.default.removeItem(atPath: memoryFile + ".tmp")
+            try? FileManager.default.removeItem(atPath: personal + "/manifest.json.tmp")
+        }
+        try "keep".write(toFile: outside, atomically: false, encoding: .utf8)
+        try fm.createDirectory(atPath: memoryDirectory, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: memoryFile + ".tmp", withDestinationPath: outside)
+        store.markDirty()
+        store.flush()
+        store.waitUntilIdleForTesting()
+        XCTAssertEqual(try String(contentsOfFile: outside, encoding: .utf8), "keep")
+        XCTAssertEqual(mode(memoryFile), 0o600)
+        try fm.createDirectory(atPath: personal, withIntermediateDirectories: true)
+        chmod(personal, 0o755)
+        try fm.createSymbolicLink(atPath: personal + "/manifest.json.tmp", withDestinationPath: outside)
+        controller.revertToFactory()  // writes manifest.json
+        controller.waitUntilIdleForTesting()
+        XCTAssertEqual(try String(contentsOfFile: outside, encoding: .utf8), "keep")
+        XCTAssertEqual(mode(personal + "/manifest.json"), 0o600)
+        XCTAssertEqual(mode(personal), 0o700)
+    }
+
+    /// Finding 3 (IME side): the helper gets its own deadline and the IME's pid.
+    func testHelperGetsDeadlineAndParentPid() throws {
+        writePool(1100)
+        refresh()
+        XCTAssertEqual(try startAndWait("reject"), "not_significant")
+        let args = try String(contentsOfFile: helperDirectory + "/args.txt", encoding: .utf8)
+        XCTAssertTrue(args.contains("--deadline-seconds 615"), args)
+        XCTAssertTrue(args.contains("--parent-pid \(getpid())"), args)
+    }
+
+    /// Finding 4: a factory model rewritten with the same size and mtime is re-hashed and old versions
+    /// are invalidated.
+    func testFactoryReplacedKeepingSizeAndMtimeDetected() throws {
+        writePool(1100)
+        refresh()
+        XCTAssertEqual(try startAndWait(), "adopted")
+        let oldSHA = try XCTUnwrap(controller.factorySHA)
+        let path = modelDirectory + "/onnx/model_quantized.onnx"
+        var before = stat()
+        XCTAssertEqual(stat(path, &before), 0)
+        try writeFactoryModel(seed: 3)
+        var times = [before.st_atimespec, before.st_mtimespec]
+        XCTAssertEqual(utimensat(AT_FDCWD, path, &times, 0), 0)
+        var after = stat()
+        XCTAssertEqual(stat(path, &after), 0)
+        XCTAssertEqual(after.st_size, before.st_size)
+        XCTAssertEqual(after.st_mtimespec.tv_sec, before.st_mtimespec.tv_sec)
+        XCTAssertEqual(after.st_mtimespec.tv_nsec, before.st_mtimespec.tv_nsec)
+        refresh()
+        let newSHA = sha256Hex(try Data(contentsOf: URL(fileURLWithPath: path)))
+        XCTAssertNotEqual(newSHA, oldSHA)
+        XCTAssertEqual(controller.factorySHA, newSHA)
+        XCTAssertNil(controller.activeVersion, "versions of the old factory model are invalidated")
+        controller.waitUntilIdleForTesting()
+        XCTAssertEqual(versionDirectories(), [])
+    }
+
+    /// Finding 5: 「改回出廠模型」 during a run cancels it; even a helper that ignores SIGTERM and exits 0 with
+    /// an adoptable result is not adopted.
+    func testRevertDuringRunCancelsAndNeverAdopts() throws {
+        writePool(1100)
+        refresh()
+        try setBehavior("adoptlate", delay: 1.5)
+        XCTAssertEqual(controller.startManualRun(), .started)
+        waitUntil { self.exists("status.json") }
+        controller.revertToFactory()
+        XCTAssertEqual(waitForRun(), "cancelled")
+        XCTAssertNil(controller.activeVersion)
+        XCTAssertTrue(controller.paused)
+        controller.waitUntilIdleForTesting()
+        XCTAssertEqual(versionDirectories(), [])
+        XCTAssertEqual(stagingEntries(), [])
+    }
+
+    /// Finding 5: a revert while an exited run's result is being moved into v<N> is not adopted either.
+    func testRevertDuringAdoptionNotAdopted() throws {
+        writePool(1100)
+        refresh()
+        XCTAssertEqual(try startAndWait(), "adopted")
+        try setBehavior("adopt", delay: 0.3)
+        XCTAssertEqual(controller.startManualRun(), .started)
+        store.suspendQueueForTesting()
+        waitUntil { !self.controller.isRunning }
+        controller.revertToFactory()
+        store.resumeQueueForTesting()
+        XCTAssertEqual(waitForRun(), "cancelled")
+        XCTAssertNil(controller.activeVersion)
+        XCTAssertEqual(controller.previousVersion, 1)
+        controller.waitUntilIdleForTesting()
+        XCTAssertEqual(versionDirectories(), ["v1"], "the renamed v2 is deleted")
+        XCTAssertNil(manifestOnDisk()?["active"])
+    }
+}

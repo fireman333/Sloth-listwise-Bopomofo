@@ -756,6 +756,16 @@ class LearningStoreTests: LearningTestCase {
     /// The files a save and a pool append write, delivered as watcher events
     /// to the real delegate, do not reload user phrases.
     func testSaveAndPoolAppendDoNotReloadUserPhrases() throws {
+        // Barrier (2026-10-08): the test host's FSEvents stream delivers its first batch several seconds
+        // after launch, including the launch-time user-phrase template writes in the root, which do reload.
+        // Write a file in the root and wait for its reload, so no earlier event lands in the measured window.
+        let barrier = (UserPhraseLocationHelper.applicationSupportRoot as NSString)
+            .appendingPathComponent("afm-fsevents-barrier.txt")
+        let g0 = LanguageModelManager.reloadGeneration
+        try "barrier".write(toFile: barrier, atomically: false, encoding: .utf8)
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: barrier) }
+        waitUntil(timeout: 10) { LanguageModelManager.reloadGeneration != g0 }
+        spin(1.2)
         let before = LanguageModelManager.reloadGeneration
         pickZhong()
         typeAndCommit(kZhongHuaKeys)

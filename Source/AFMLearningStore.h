@@ -57,6 +57,21 @@ struct AFMSentenceRecord {
 /// known and equal).
 FOUNDATION_EXPORT BOOL AFMSecureInputHeldByClient(BOOL secureInputEnabled, int holderPID, pid_t clientPID);
 
+/// Private learning-data files (Codex review 2026-10-08, finding 2; spec
+/// personal-memory "files readable and writable only by the user").
+/// Opens `path` with `flags` (O_CREAT etc.) plus O_NOFOLLOW | O_CLOEXEC, mode
+/// 0600; refuses (-1, errno ELOOP / EPERM) a symlink, a non-regular file, a
+/// file owned by another user or with more than one link; an existing file
+/// with wider permissions is narrowed to 0600 (fchmod). Any thread.
+FOUNDATION_EXPORT int AFMOpenPrivateFile(NSString *path, int flags);
+/// Creates `directory` (with intermediates, 0700) or checks the existing one:
+/// must be a directory owned by the user; its mode is set to 0700. Any thread.
+FOUNDATION_EXPORT BOOL AFMEnsurePrivateDirectory(NSString *directory);
+/// Writes `data` to `path` via a fresh `<path>.tmp` (O_EXCL | O_NOFOLLOW,
+/// 0600) and rename(2) (which replaces a symlink at `path` itself, never its
+/// target). The parent directory is made private first. Any thread.
+FOUNDATION_EXPORT BOOL AFMWritePrivateFileAtomically(NSString *path, NSData *data);
+
 @interface AFMLearningStore : NSObject
 
 @property (class, readonly, nonatomic) AFMLearningStore *sharedStore NS_SWIFT_NAME(shared);

@@ -68,23 +68,83 @@ static void AFMLogWriteErrorOnce(const char *what, int error)
     }
 }
 
+BOOL AFMEnsurePrivateDirectory(NSString *directory)
+{
+    const char *path = directory.fileSystemRepresentation;
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        NSError *error = nil;
+        if (![NSFileManager.defaultManager createDirectoryAtPath:directory
+                                     withIntermediateDirectories:YES
+                                                      attributes:@{ NSFilePosixPermissions : @(0700) }
+                                                           error:&error]
+            || stat(path, &st) != 0) {
+            errno = error != nil ? (int)error.code : errno;
+            return NO;
+        }
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
+        errno = EPERM;
+        return NO;
+    }
+    if ((st.st_mode & 07777) != 0700 && chmod(path, 0700) != 0) {
+        return NO;
+    }
+    return YES;
+}
+
+int AFMOpenPrivateFile(NSString *path, int flags)
+{
+    int fd = open(path.fileSystemRepresentation, flags | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink > 1) {
+        close(fd);
+        errno = EPERM;
+        return -1;
+    }
+    if ((st.st_mode & 07777) != 0600 && fchmod(fd, 0600) != 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
+static bool AFMWriteAll(int fd, const std::string& data);
+
+BOOL AFMWritePrivateFileAtomically(NSString *path, NSData *data)
+{
+    if (!AFMEnsurePrivateDirectory(path.stringByDeletingLastPathComponent)) {
+        return NO;
+    }
+    NSString *tmp = [path stringByAppendingString:@".tmp"];
+    unlink(tmp.fileSystemRepresentation);  // never write through a planted .tmp
+    int fd = AFMOpenPrivateFile(tmp, O_WRONLY | O_CREAT | O_EXCL);
+    if (fd < 0) {
+        return NO;
+    }
+    bool ok = AFMWriteAll(fd, std::string(static_cast<const char *>(data.bytes), data.length));
+    int writeError = errno;
+    close(fd);
+    if (!ok || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation) != 0) {
+        unlink(tmp.fileSystemRepresentation);
+        errno = ok ? errno : writeError;
+        return NO;
+    }
+    return YES;
+}
+
 // Store queue only.
 static bool AFMEnsureDirectory(NSString *directory)
 {
-    BOOL isDirectory = NO;
-    if ([NSFileManager.defaultManager fileExistsAtPath:directory isDirectory:&isDirectory] && isDirectory) {
-        return true;
-    }
-    NSError *error = nil;
-    BOOL ok = [NSFileManager.defaultManager createDirectoryAtPath:directory
-                                      withIntermediateDirectories:YES
-                                                       attributes:@{ NSFilePosixPermissions : @(0700) }
-                                                            error:&error];
-    if (!ok) {
-        AFMLogWriteErrorOnce("mkdir", (int)error.code);
+    if (!AFMEnsurePrivateDirectory(directory)) {
+        AFMLogWriteErrorOnce("mkdir", errno);
         return false;
     }
-    chmod(directory.fileSystemRepresentation, 0700);
     return true;
 }
 
@@ -106,41 +166,25 @@ static bool AFMWriteAll(int fd, const std::string& data)
     return true;
 }
 
-// Store queue only: .tmp (0600) then rename.
+// Store queue only: fresh .tmp (0600, no symlink) then rename.
 static void AFMWriteFileAtomically(NSString *directory, NSString *path, const std::string& data)
 {
     if (!AFMEnsureDirectory(directory)) {
         return;
     }
-    std::string target = path.fileSystemRepresentation;
-    std::string tmp = target + ".tmp";
-    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        AFMLogWriteErrorOnce("open", errno);
-        return;
-    }
-    fchmod(fd, 0600);
-    bool ok = AFMWriteAll(fd, data);
-    int writeError = errno;
-    close(fd);
-    if (!ok) {
-        AFMLogWriteErrorOnce("write", writeError);
-        unlink(tmp.c_str());
-        return;
-    }
-    if (rename(tmp.c_str(), target.c_str()) != 0) {
-        AFMLogWriteErrorOnce("rename", errno);
-        unlink(tmp.c_str());
+    if (!AFMWritePrivateFileAtomically(path, [NSData dataWithBytesNoCopy:(void *)data.data() length:data.size() freeWhenDone:NO])) {
+        AFMLogWriteErrorOnce("write", errno);
     }
 }
 
-// Store queue only.
+// Store queue only. The pool (typed text) is never written through a symlink
+// or into a file readable by others (Codex review 2026-10-08, finding 2).
 static void AFMAppendLine(NSString *directory, NSString *path, const std::string& line)
 {
     if (!AFMEnsureDirectory(directory)) {
         return;
     }
-    int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    int fd = AFMOpenPrivateFile(path, O_WRONLY | O_CREAT | O_APPEND);
     if (fd < 0) {
         AFMLogWriteErrorOnce("open", errno);
         return;

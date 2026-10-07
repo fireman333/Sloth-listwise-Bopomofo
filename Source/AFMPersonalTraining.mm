@@ -72,12 +72,7 @@ static os_log_t AFMPersonalLog(void)
 
 static BOOL AFMMakeDirectory700(NSString *path)
 {
-    NSError *error = nil;
-    if (![NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:@{ NSFilePosixPermissions : @(0700) } error:&error]) {
-        return NO;
-    }
-    chmod(path.fileSystemRepresentation, 0700);
-    return YES;
+    return AFMEnsurePrivateDirectory(path);
 }
 
 static NSDictionary *_Nullable AFMReadJSONFile(NSString *path)
@@ -90,40 +85,11 @@ static NSDictionary *_Nullable AFMReadJSONFile(NSString *path)
     return [object isKindOfClass:NSDictionary.class] ? object : nil;
 }
 
-// .tmp (0600) + rename.
+// Fresh .tmp (0600, O_EXCL | O_NOFOLLOW) + rename (Codex review 2026-10-08, finding 2).
 static BOOL AFMWriteJSONFileAtomically(NSString *path, NSDictionary *object)
 {
     NSData *data = [NSJSONSerialization dataWithJSONObject:object options:NSJSONWritingSortedKeys error:nil];
-    if (data == nil || !AFMMakeDirectory700(path.stringByDeletingLastPathComponent)) {
-        return NO;
-    }
-    NSString *tmp = [path stringByAppendingString:@".tmp"];
-    int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        return NO;
-    }
-    fchmod(fd, 0600);
-    const char *p = static_cast<const char *>(data.bytes);
-    size_t left = data.length;
-    BOOL ok = YES;
-    while (left > 0) {
-        ssize_t n = write(fd, p, left);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            ok = NO;
-            break;
-        }
-        p += n;
-        left -= static_cast<size_t>(n);
-    }
-    close(fd);
-    if (!ok || rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation) != 0) {
-        unlink(tmp.fileSystemRepresentation);
-        return NO;
-    }
-    return YES;
+    return data != nil && AFMWritePrivateFileAtomically(path, data);
 }
 
 static void AFMRemoveItem(NSString *path)
@@ -151,11 +117,14 @@ NSString *AFMFactoryModelSHA256(NSString *modelDirectory)
         cache = [NSMutableDictionary dictionary];
     });
     NSString *path = [modelDirectory stringByAppendingPathComponent:@"onnx/model_quantized.onnx"];
-    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
-    if (attributes == nil) {
+    // Keyed by device, inode, size, mtime and ctime (ns): a replaced file
+    // (new inode) or one rewritten in place with its size and mtime restored
+    // (ctime moves) is re-hashed (Codex review 2026-10-08, finding 4).
+    struct stat st;
+    if (stat(path.fileSystemRepresentation, &st) != 0) {
         return nil;
     }
-    NSArray *key = @[ @(attributes.fileSize), @(attributes.fileModificationDate.timeIntervalSince1970) ];
+    NSArray *key = @[ @(st.st_dev), @(st.st_ino), @(st.st_size), @(st.st_mtimespec.tv_sec), @(st.st_mtimespec.tv_nsec), @(st.st_ctimespec.tv_sec), @(st.st_ctimespec.tv_nsec) ];
     @synchronized(cache) {
         NSArray *entry = cache[path];
         if (entry != nil && [entry[0] isEqual:key]) {
@@ -411,6 +380,8 @@ static double AFMSystemIdleSeconds(void)
 @property (nonatomic) double started;
 @property (nonatomic) NSInteger eligibleAtStart;
 @property (copy, nonatomic) NSDictionary *evalConfig;
+/// _revertSerial at the spawn: a later 「改回出廠模型」 means never adopt.
+@property (nonatomic) NSUInteger revertSerial;
 @end
 
 @implementation AFMPersonalRun
@@ -423,6 +394,7 @@ static double AFMSystemIdleSeconds(void)
 @synthesize started = _started;
 @synthesize eligibleAtStart = _eligibleAtStart;
 @synthesize evalConfig = _evalConfig;
+@synthesize revertSerial = _revertSerial;
 @end
 
 static AFMPersonalTrainingController *gSharedController = nil;
@@ -438,6 +410,8 @@ static AFMPersonalTrainingController *gSharedController = nil;
     NSMutableArray<dispatch_block_t> *_scanWaiters;
     NSMutableArray<dispatch_block_t> *_clearWaiters;
     BOOL _clearing;
+    BOOL _clearIncomplete;
+    NSUInteger _revertSerial;
     NSUInteger _pendingMainWork;
     // Store queue only.
     BOOL _vocabLoaded;
@@ -470,6 +444,8 @@ static AFMPersonalTrainingController *gSharedController = nil;
 @synthesize failurePauseCount = _failurePauseCount;
 @synthesize generation = _generation;
 @synthesize runDidFinishHandler = _runDidFinishHandler;
+@synthesize clearRetryInterval = _clearRetryInterval;
+@synthesize clearIncomplete = _clearIncomplete;
 
 + (AFMPersonalTrainingController *)sharedController
 {
@@ -516,9 +492,23 @@ static AFMPersonalTrainingController *gSharedController = nil;
         _queueGeneration = 0;
         _scanWaiters = [NSMutableArray array];
         _clearWaiters = [NSMutableArray array];
-        // The manifest is tiny; read once here (launch / tests, not the key path).
-        NSDictionary *manifest = AFMReadJSONFile([self _manifestPath]);
-        _manifest = manifest != nil ? [manifest mutableCopy] : [NSMutableDictionary dictionary];
+        _clearRetryInterval = 60;
+        if ([NSFileManager.defaultManager fileExistsAtPath:[self _clearMarkerPath]]) {
+            // A clear did not finish (deletion failed or the IME quit first):
+            // never read the old manifest back; factory weights until the
+            // deletion succeeds (Codex review 2026-10-08, finding 1).
+            os_log_error(AFMPersonalLog(), "personalized data clear incomplete: retrying");
+            _manifest = [NSMutableDictionary dictionary];
+            _clearing = YES;
+            _clearIncomplete = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self _resumeClearIfWaiting];
+            });
+        } else {
+            // The manifest is tiny; read once here (launch / tests, not the key path).
+            NSDictionary *manifest = AFMReadJSONFile([self _manifestPath]);
+            _manifest = manifest != nil ? [manifest mutableCopy] : [NSMutableDictionary dictionary];
+        }
         _generation = 0;
         _packAvailable = [NSFileManager.defaultManager fileExistsAtPath:[AFMPackDirectory(_modelDirectory) stringByAppendingPathComponent:@"pack.json"]];
     }
@@ -530,6 +520,13 @@ static AFMPersonalTrainingController *gSharedController = nil;
 - (NSString *)personalDirectory
 {
     return [_memoryDirectory stringByAppendingPathComponent:AFMPersonalDirectoryName];
+}
+
+/// memory/r-personal.clearing: written before a clear deletes r-personal/,
+/// removed after the deletion was verified.
+- (NSString *)_clearMarkerPath
+{
+    return [_memoryDirectory stringByAppendingPathComponent:[AFMPersonalDirectoryName stringByAppendingString:@".clearing"]];
 }
 
 - (NSString *)_manifestPath
@@ -1010,6 +1007,10 @@ static AFMPersonalTrainingController *gSharedController = nil;
         @"--accept-yan-for-ai", Preferences.acceptYanReadingForAi ? @"1" : @"0",
         @"--alpha", [NSString stringWithFormat:@"%.17g", Preferences.neuralWalkAlpha],
         @"--threads", [NSString stringWithFormat:@"%ld", (long)_helperThreads],
+        // The helper's own backstop deadline (Codex review 2026-10-08,
+        // finding 3); it also exits when this process does.
+        @"--deadline-seconds", [NSString stringWithFormat:@"%.0f", ceil(_runTimeLimit + _killGracePeriod + 10)],
+        @"--parent-pid", [NSString stringWithFormat:@"%d", getpid()],
     ]];
     NSNumber *active = self.activeVersion;
     if (active != nil) {
@@ -1060,6 +1061,7 @@ static AFMPersonalTrainingController *gSharedController = nil;
     record.started = [self _now];
     record.eligibleAtStart = _eligibleCount;
     record.evalConfig = self.currentEvalConfig;
+    record.revertSerial = _revertSerial;
     _run = record;
     [self _protectRun:run protect:YES];
 
@@ -1148,7 +1150,9 @@ static NSString *AFMResultForExitCode(int code)
     // arrived, or that finished after learning was switched off, is never
     // adopted (spec "Training triggers": runs only while learning is on;
     // "Cancel": nothing is adopted).
-    NSString *forced = record.killReason != nil ? record.killReason : (![self _learningEnabled] ? @"cancelled" : nil);
+    // 「改回出廠模型」 after the spawn cancels the run too (Codex review
+    // 2026-10-08, finding 5).
+    NSString *forced = record.killReason != nil ? record.killReason : ((![self _learningEnabled] || record.revertSerial != _revertSerial) ? @"cancelled" : nil);
     if (signaled || code != 0 || forced != nil) {
         NSString *fallback = forced != nil ? forced : (signaled ? @"failed:crash" : AFMResultForExitCode(code));
         [self _onQueue:^id {
@@ -1210,7 +1214,12 @@ static NSString *AFMResultForExitCode(int code)
     } then:^(NSDictionary *outcome) {
         self->_adoptingVersion = -1;
         NSString *result = (outcome[@"result"] != nil ? outcome[@"result"] : @"failed:adopt");
-        if ([result isEqualToString:@"adopted"]) {
+        if ([result isEqualToString:@"adopted"] && record.revertSerial != self->_revertSerial) {
+            // 「改回出廠模型」 while the result was being moved into v<N>: the
+            // renamed folder is unreferenced and deleted, nothing is adopted.
+            result = @"cancelled";
+            [self _deleteUnreferencedVersions];
+        } else if ([result isEqualToString:@"adopted"]) {
             [self _adoptVersion:version record:record report:outcome[@"report"]];
         }
         [self _finishRun:record result:result report:outcome[@"report"]];
@@ -1236,11 +1245,17 @@ static NSString *AFMResultForExitCode(int code)
     if (![self _loadVocabIfNeeded]) {
         return YES;  // Cannot tell which records were used: be safe.
     }
-    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:pool];
-    NSData *head = [handle readDataUpToLength:(NSUInteger)offset error:nil];
-    [handle closeFile];
+    // Streamed and bounded like the helper's scan (Codex review 2026-10-08,
+    // finding 3): the newest window of [0, scan_offset).
     pz::PoolScan scan;
-    pz::ScanPoolBytes(std::string_view(static_cast<const char *>(head.bytes), head.length), _vocab, pz::SegmentOptions(), &scan);
+    pz::ReadOptions read;
+    read.endOffset = offset;
+    if (offset == 0) {
+        return NO;  // The helper read no record.
+    }
+    if (!pz::ScanPool(pool.fileSystemRepresentation, _vocab, pz::SegmentOptions(), &scan, &error, read)) {
+        return YES;  // Cannot tell which records were used: be safe.
+    }
     for (const auto &segment : scan.segments) {
         if (retracted.count(segment.tMs) != 0) {
             return YES;
@@ -1351,6 +1366,12 @@ static NSString *AFMResultForExitCode(int code)
 
 - (void)revertToFactory
 {
+    // A run in progress (or whose result is being moved into place) is
+    // cancelled and never adopted (Codex review 2026-10-08, finding 5).
+    ++_revertSerial;
+    if (_run != nil) {
+        [self _terminate:_run reason:@"cancelled"];
+    }
     NSNumber *active = self.activeVersion;
     if (active != nil) {
         NSNumber *previous = self.previousVersion;
@@ -1402,6 +1423,15 @@ static NSString *AFMResultForExitCode(int code)
     _manifest = [NSMutableDictionary dictionary];
     _eligibleCount = 0;
     _scannedPoolSize = 0;
+    // Write-ahead marker: if the deletion fails or the IME quits first, the
+    // next launch does not read the old manifest back (finding 1).
+    NSString *personal = self.personalDirectory;
+    NSString *marker = [self _clearMarkerPath];
+    dispatch_async([self _ioQueue], ^{
+        if ([NSFileManager.defaultManager fileExistsAtPath:personal]) {
+            AFMWritePrivateFileAtomically(marker, [@"1\n" dataUsingEncoding:NSUTF8StringEncoding]);
+        }
+    });
     // (2) factory weights from the next activation; a personalized scorer in
     // use is replaced in the background right away.
     [AFMNeuralSelector.sharedSelector requestFactoryWeights];
@@ -1414,22 +1444,62 @@ static NSString *AFMResultForExitCode(int code)
     [self _notify];
 }
 
+// Store queue. Deletes r-personal/ and verifies it is gone; when it is not,
+// at least the manifest (the only thing that can bring a version back) is
+// removed or emptied. YES only when r-personal/ no longer exists.
+static BOOL AFMDeletePersonalDirectory(NSString *personal, NSString *marker)
+{
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm removeItemAtPath:personal error:nil];
+    struct stat st;
+    if (lstat(personal.fileSystemRepresentation, &st) != 0 && errno == ENOENT) {
+        if (unlink(marker.fileSystemRepresentation) != 0 && errno != ENOENT) {
+            os_log_error(AFMPersonalLog(), "personalized data cleared; clear marker not removed: errno %d", errno);
+        }
+        return YES;
+    }
+    NSString *manifest = [personal stringByAppendingPathComponent:@"manifest.json"];
+    if (unlink(manifest.fileSystemRepresentation) != 0 && errno != ENOENT) {
+        AFMWriteJSONFileAtomically(manifest, @{ @"format" : @1 });
+    }
+    return NO;
+}
+
 - (void)_resumeClearIfWaiting
 {
     if (!_clearing || _run != nil) {
         return;
     }
     NSString *personal = self.personalDirectory;
+    NSString *marker = [self _clearMarkerPath];
     uint64_t generation = _generation;
     ++_pendingMainWork;
     dispatch_async([self _ioQueue], ^{
-        AFMRemoveItem(personal);
+        BOOL deleted = AFMDeletePersonalDirectory(personal, marker);
         dispatch_async(dispatch_get_main_queue(), ^{
             --self->_pendingMainWork;
             if (self->_generation != generation) {
                 return;  // Another clear took over; it finishes the waiters.
             }
+            if (!deleted) {
+                // Never report success: personalization stays off (factory
+                // weights, no runs) and the deletion is retried; the marker
+                // makes the next launch retry too (finding 1).
+                os_log_error(AFMPersonalLog(), "personalized data clear incomplete: will retry");
+                BOOL changed = !self->_clearIncomplete;
+                self->_clearIncomplete = YES;
+                if (changed) {
+                    [self _notify];
+                }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(self->_clearRetryInterval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (self->_generation == generation) {
+                        [self _resumeClearIfWaiting];
+                    }
+                });
+                return;
+            }
             self->_clearing = NO;
+            self->_clearIncomplete = NO;
             NSArray<dispatch_block_t> *waiters = [self->_clearWaiters copy];
             [self->_clearWaiters removeAllObjects];
             [self _notify];

@@ -84,7 +84,7 @@ typedef NS_ENUM(NSInteger, AFMPersonalBlockReason) {
 /// The evaluation configuration of the running IME (design D11 / Open
 /// Question 20): factory SHA-256 of models/r-walk/onnx/model_quantized.onnx,
 /// alpha, reading policy, pack and calibration version. Hashing is cached by
-/// size and mtime; call off the main thread when not cached.
+/// device, inode, size, mtime and ctime; call off the main thread when not cached.
 FOUNDATION_EXPORT NSString *_Nullable AFMFactoryModelSHA256(NSString *modelDirectory);
 FOUNDATION_EXPORT NSString *_Nullable AFMPersonalPackVersion(NSString *modelDirectory);
 FOUNDATION_EXPORT NSDictionary *AFMCurrentEvalConfig(NSString *_Nullable factorySHA, NSString *_Nullable packVersion, double alpha, BOOL acceptYan);
@@ -134,6 +134,8 @@ FOUNDATION_EXPORT BOOL AFMWriteFactoryWeightsFileForTesting(NSString *modelDirec
 @property (assign, nonatomic) NSTimeInterval minimumIdle;         // 10 min
 @property (assign, nonatomic) NSInteger helperThreads;            // 4
 @property (assign, nonatomic) NSInteger failurePauseCount;        // 3
+/// Delay before retrying a clear whose deletion failed.
+@property (assign, nonatomic) NSTimeInterval clearRetryInterval;  // 60 s
 
 // MARK: State (main thread)
 @property (readonly, nonatomic) uint64_t generation;
@@ -177,7 +179,8 @@ FOUNDATION_EXPORT BOOL AFMWriteFactoryWeightsFileForTesting(NSString *modelDirec
 /// SIGTERM, then SIGKILL after killGracePeriod. Result "cancelled".
 - (void)cancelRun;
 
-/// 「改回出廠模型」: active = none, previous = the old active, paused.
+/// 「改回出廠模型」: active = none, previous = the old active, paused; a run in
+/// progress is cancelled and its result never adopted.
 - (void)revertToFactory;
 /// 「改用上一版」: swap active and previous.
 - (void)usePreviousVersion;
@@ -186,6 +189,12 @@ FOUNDATION_EXPORT BOOL AFMWriteFactoryWeightsFileForTesting(NSString *modelDirec
 /// factory weights, kill a running helper, then delete memory/r-personal/
 /// after its exit (on the store queue). Completion on main after deletion.
 - (void)clearAllWithCompletion:(nullable dispatch_block_t)completion;
+
+/// A clear whose deletion of memory/r-personal/ failed (or was interrupted by
+/// quitting, memory/r-personal.clearing present at launch): personalization
+/// stays off (factory weights, no runs) and the deletion is retried every
+/// clearRetryInterval and at launch; the clear completion waits for success.
+@property (readonly, nonatomic) BOOL clearIncomplete;
 
 /// The version the selector should load (nil = factory weights).
 - (nullable AFMPersonalVersionRequest *)activeVersionRequest;
