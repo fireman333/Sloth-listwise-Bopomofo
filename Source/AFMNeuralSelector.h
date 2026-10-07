@@ -1,0 +1,89 @@
+// AFMNeuralSelector: owns the R model (SlothLM-E ranker export) used for
+// R-walk, loads it off the main thread, and decides per walk whether the
+// composing buffer is selected with R-walk or with the stock walk.
+//
+// Fallback chain: R-walk -> stock walk. Any problem (onnxruntime missing,
+// model directory missing, load failure, empty score table, slow inference,
+// switch off, alpha 0, > kAFMNeuralMaxSyllables) means the stock
+// ReadingGrid::walk() for that walk; typing is never blocked. The caller
+// (KeyHandler) only asks for it in Bopomofo mode.
+//
+// Threading: inference and every state read/write happen on the main thread;
+// only model loading runs on a private serial queue, and its result is
+// published back on the main queue.
+
+#import <Foundation/Foundation.h>
+
+#ifdef __cplusplus
+#import "reading_grid.h"
+#endif
+
+NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSInteger, AFMNeuralSelectorState) {
+    /// Not loaded because the switch was off when loading was last considered.
+    AFMNeuralSelectorStateDisabled = 0,
+    AFMNeuralSelectorStateLoading,
+    AFMNeuralSelectorStateReady,
+    /// onnxruntime missing, model directory missing, or load failure. Sticky.
+    AFMNeuralSelectorStateFailed,
+    /// Slow-inference circuit breaker tripped. Sticky for the process.
+    AFMNeuralSelectorStateTripped,
+};
+
+/// Readings above this length always use the stock walk (design D10).
+extern const NSUInteger kAFMNeuralMaxSyllables;
+
+/// Test-only scorer: readings (one syllable each) and, per position, the
+/// characters the grid can place there -> per position {character: log p}.
+/// Return nil or an empty array to simulate an inference failure.
+typedef NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable (^AFMNeuralScoreBlock)(
+    NSArray<NSString *> *readings, NSArray<NSArray<NSString *> *> *charsAtPositions);
+
+@interface AFMNeuralSelector : NSObject
+
+/// The process-wide selector, created lazily with
+/// UserPhraseLocationHelper.rWalkModelDirectory. Tests may replace it.
+@property (class, nonatomic, strong) AFMNeuralSelector *sharedSelector NS_SWIFT_NAME(shared);
+
+/// Replaces the shared selector with one that has no model (its first load
+/// attempt fails), so every walk is the stock walk.
++ (void)resetForTesting;
+
+/// Production selector loading SlothRescorer from modelDirectory (nil = no
+/// model; the first load attempt fails).
+- (instancetype)initWithModelDirectory:(nullable NSString *)modelDirectory;
+/// Fake model: loading sleeps loadDelay seconds on the load queue, then the
+/// selector becomes ready and scores with scoreBlock.
+- (instancetype)initWithScoreBlockForTesting:(AFMNeuralScoreBlock)scoreBlock
+                                   loadDelay:(NSTimeInterval)loadDelay;
+- (instancetype)init NS_UNAVAILABLE;
+
+/// Reads AFMNeuralWalkEnabled / AFMNeuralWalkAlpha and, if enabled, starts
+/// loading (non-blocking). Call on launch and on every activation.
+- (void)syncWithPreferences;
+/// Starts the background load if the switch is on and nothing was loaded yet
+/// (state disabled). Never blocks.
+- (void)startLoadingIfNeeded;
+
+@property (readonly, nonatomic) AFMNeuralSelectorState state;
+@property (assign, nonatomic) BOOL enabled;
+@property (assign, nonatomic) double alpha;
+@property (readonly, nonatomic, nullable) NSString *modelDirectory;
+/// Wall time of the last completed load attempt, in ms (0 if none yet).
+@property (readonly, nonatomic) double lastLoadMilliseconds;
+/// Number of walks that ran a forward pass (cache misses), for tests.
+@property (readonly, nonatomic) NSUInteger forwardCount;
+/// Number of walks that used neural scores (fresh or cached), for tests.
+@property (readonly, nonatomic) NSUInteger neuralWalkCount;
+
+#ifdef __cplusplus
+/// Walks the grid for the composing buffer: R-walk when the model is ready,
+/// enabled, alpha != 0, not tripped and the grid holds
+/// 1...kAFMNeuralMaxSyllables readings; the stock walk otherwise.
+- (Formosa::Gramambular2::ReadingGrid::WalkResult)walkGrid:(Formosa::Gramambular2::ReadingGrid &)grid;
+#endif
+
+@end
+
+NS_ASSUME_NONNULL_END

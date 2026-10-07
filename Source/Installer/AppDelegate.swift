@@ -24,12 +24,25 @@
 import Cocoa
 import InputSourceHelper
 
-private let kTargetBin = "McBopomofo"
+private let kTargetBin = "Sloth-listwise-Bopomofo"
 private let kTargetType = "app"
-private let kTargetBundle = "McBopomofo.app"
+private let kTargetBundle = kTargetBin + "." + kTargetType
+private let kTargetBundleIdentifier = "io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo"
 private let kDestinationPartial = "~/Library/Input Methods/"
-private let kTargetPartialPath = "~/Library/Input Methods/McBopomofo.app"
-private let kTargetFullBinPartialPath = "~/Library/Input Methods/McBopomofo.app/Contents/MacOS/McBopomofo"
+private let kTargetPartialPath = kDestinationPartial + kTargetBundle
+private let kTerminationWaitDeadline: TimeInterval = 2.0
+
+/// Force-terminates running instances of this input method only (matched by
+/// bundle identifier, never by process name, so a stock McBopomofo is never
+/// touched), then waits up to `kTerminationWaitDeadline` for them to exit.
+private func terminateRunningInputMethod() {
+    let running = NSRunningApplication.runningApplications(withBundleIdentifier: kTargetBundleIdentifier)
+    running.forEach { $0.forceTerminate() }
+    let deadline = Date().addingTimeInterval(kTerminationWaitDeadline)
+    while running.contains(where: { !$0.isTerminated }) && Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+}
 
 private let kTranslocationRemovalTickInterval: TimeInterval = 0.5
 private let kTranslocationRemovalDeadline: TimeInterval = 60.0
@@ -154,11 +167,7 @@ class AppDelegate: NSWindowController, NSApplicationDelegate {
                 return
             }
 
-            let killTask = Process()
-            killTask.launchPath = "/usr/bin/killall"
-            killTask.arguments = ["-9", kTargetBin]
-            killTask.launch()
-            killTask.waitUntilExit()
+            terminateRunningInputMethod()
 
             if shouldWaitForTranslocationRemoval {
                 progressIndicator.startAnimation(self)

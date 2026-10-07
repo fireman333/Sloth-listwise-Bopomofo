@@ -70,7 +70,14 @@ private func install() -> Int32 {
     return 0
 }
 
-let kConnectionName = "McBopomofo_1_Connection"
+// The connection name is declared once in Info.plist (InputMethodConnectionName,
+// derived from the bundle identifier); fall back to the same derivation.
+let kConnectionName: String = {
+    if let name = Bundle.main.infoDictionary?["InputMethodConnectionName"] as? String, !name.isEmpty {
+        return name
+    }
+    return "\(Bundle.main.bundleIdentifier ?? "")_Connection"
+}()
 
 if CommandLine.arguments.count > 1 {
     if CommandLine.arguments[1] == "install" {

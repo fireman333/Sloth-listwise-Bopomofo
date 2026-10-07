@@ -17,6 +17,8 @@
 #define SOURCE_ENGINE_RESCORER_NEURAL_WALK_H_
 
 #include <chrono>
+#include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -39,6 +41,59 @@ struct NeuralWalkStats {
   double walkMs = 0;
 };
 
+// Injectable scorer: (readings, optional per-position extra chars) -> table.
+// Production wraps SlothRescorer::charLogProbs; tests pass a fake.
+using NeuralScorer = std::function<SlothRescorer::CharLogProbTable(
+    const std::vector<std::string>&, const std::vector<std::vector<std::string>>*)>;
+
+// Characters the grid can place at each position (ReadingGrid::charsAtPositions).
+using CharsAtPositions = std::vector<std::vector<std::string>>;
+
+// Returns an empty NeuralScorer when model is null or not ready.
+inline NeuralScorer MakeNeuralScorer(SlothRescorer* model) {
+  if (model == nullptr || !model->ready()) return NeuralScorer();
+  return [model](const std::vector<std::string>& readings, const CharsAtPositions* extra) {
+    return model->charLogProbs(readings, extra);
+  };
+}
+
+// Step 1 of R-walk: one forward pass producing the per-position score table.
+// chars must be grid.charsAtPositions(); it is taken as an argument so a
+// caller that also keys a cache on it computes it only once.
+// Returns an empty table (table.empty()) on any failure: no scorer,
+// alpha == 0, empty grid, or a table whose length != grid.length().
+inline Formosa::Gramambular2::ReadingGrid::PositionalCharScores ComputeCharScores(
+    Formosa::Gramambular2::ReadingGrid& grid, const NeuralScorer& scorer,
+    const NeuralWalkOptions& options, const CharsAtPositions& chars) {
+  Formosa::Gramambular2::ReadingGrid::PositionalCharScores scores;
+  scores.missingScore = options.missingLogProb;
+  if (!scorer || options.alpha == 0 || grid.length() == 0) return scores;
+  scores.table = scorer(grid.readings(), options.normaliseOverGridChars ? &chars : nullptr);
+  if (scores.table.size() != grid.length()) scores.table.clear();
+  return scores;
+}
+
+inline Formosa::Gramambular2::ReadingGrid::PositionalCharScores ComputeCharScores(
+    Formosa::Gramambular2::ReadingGrid& grid, const NeuralScorer& scorer,
+    const NeuralWalkOptions& options = NeuralWalkOptions()) {
+  return ComputeCharScores(grid, scorer, options,
+                           options.normaliseOverGridChars ? grid.charsAtPositions()
+                                                          : CharsAtPositions());
+}
+
+// Step 2: walk with a precomputed table. Falls back to grid.walk() when the
+// table is empty or its length != grid.length(). *usedNeural reports which
+// path ran.
+inline Formosa::Gramambular2::ReadingGrid::WalkResult WalkWithScores(
+    Formosa::Gramambular2::ReadingGrid& grid,
+    const Formosa::Gramambular2::ReadingGrid::PositionalCharScores& scores, double alpha,
+    bool* usedNeural = nullptr) {
+  bool neural = !scores.table.empty() && scores.table.size() == grid.length();
+  if (usedNeural != nullptr) *usedNeural = neural;
+  if (!neural) return grid.walk();
+  return grid.walkWithCharBonus(alpha, scores);
+}
+
 inline Formosa::Gramambular2::ReadingGrid::WalkResult NeuralWalk(
     Formosa::Gramambular2::ReadingGrid& grid, SlothRescorer* model,
     const NeuralWalkOptions& options = NeuralWalkOptions(),
@@ -50,33 +105,79 @@ inline Formosa::Gramambular2::ReadingGrid::WalkResult NeuralWalk(
   NeuralWalkStats local;
   NeuralWalkStats& st = stats != nullptr ? *stats : local;
   st = NeuralWalkStats();
-  if (model == nullptr || !model->ready() || options.alpha == 0 || grid.length() == 0) {
-    auto t = Clock::now();
-    auto r = grid.walk();
-    st.walkMs = ms(t);
-    return r;
-  }
+  NeuralScorer scorer = MakeNeuralScorer(model);
+  // forwardMs stays 0 when nothing would be scored (no model, alpha 0, empty grid).
   auto t0 = Clock::now();
-  Formosa::Gramambular2::ReadingGrid::PositionalCharScores scores;
-  scores.missingScore = options.missingLogProb;
-  if (options.normaliseOverGridChars) {
-    std::vector<std::vector<std::string>> extra = grid.charsAtPositions();
-    scores.table = model->charLogProbs(grid.readings(), &extra);
-  } else {
-    scores.table = model->charLogProbs(grid.readings());
-  }
-  st.forwardMs = ms(t0);
+  auto scores = ComputeCharScores(grid, scorer, options);
+  if (scorer && options.alpha != 0 && grid.length() != 0) st.forwardMs = ms(t0);
   auto t1 = Clock::now();
-  if (scores.table.size() != grid.length()) {
-    auto r = grid.walk();
-    st.walkMs = ms(t1);
-    return r;
-  }
-  auto r = grid.walkWithCharBonus(options.alpha, scores);
+  auto r = WalkWithScores(grid, scores, options.alpha, &st.usedNeural);
   st.walkMs = ms(t1);
-  st.usedNeural = true;
   return r;
 }
+
+// One-entry cache of the score table. The table is a pure function of
+// (readings, characters each position can take), so that pair is the key;
+// user overrides / UOM only change node scores, not the table. Empty tables
+// (failed forward) are never stored, so the next keystroke retries.
+class NeuralScoreCache {
+ public:
+  using Scores = Formosa::Gramambular2::ReadingGrid::PositionalCharScores;
+
+  // Returns the cached table if it was stored for this key, else nullptr.
+  // An empty cached table means nothing is cached.
+  const Scores* lookup(const std::vector<std::string>& readings,
+                       const CharsAtPositions& chars) const {
+    if (scores_.table.empty()) return nullptr;
+    if (readings != readings_ || chars != chars_) return nullptr;
+    return &scores_;
+  }
+
+  const Scores* lookup(const Formosa::Gramambular2::ReadingGrid& grid) const {
+    if (scores_.table.empty() || grid.readings() != readings_) return nullptr;
+    return lookup(grid.readings(), grid.charsAtPositions());
+  }
+
+  // Takes ownership of scores and returns the cached copy, or nullptr (cache
+  // untouched) when the table is empty.
+  const Scores* store(std::vector<std::string> readings, CharsAtPositions chars, Scores&& scores) {
+    if (scores.table.empty()) return nullptr;
+    readings_ = std::move(readings);
+    chars_ = std::move(chars);
+    scores_ = std::move(scores);
+    return &scores_;
+  }
+
+  void clear() { *this = NeuralScoreCache(); }
+
+ private:
+  std::vector<std::string> readings_;
+  CharsAtPositions chars_;
+  Scores scores_;
+};
+
+// Trips (sticky) after kConsecutive consecutive keystrokes slower than
+// kThresholdMs. Record only keystrokes that ran inference; a fast one resets
+// the streak. Time is fed in, so tests need no clock.
+class NeuralCircuitBreaker {
+ public:
+  static constexpr double kThresholdMs = 10.0;
+  static constexpr int kConsecutive = 3;
+
+  void record(double ms) {
+    if (tripped_) return;
+    if (ms > kThresholdMs) {
+      if (++slowStreak_ >= kConsecutive) tripped_ = true;
+    } else {
+      slowStreak_ = 0;
+    }
+  }
+  bool tripped() const { return tripped_; }
+
+ private:
+  int slowStreak_ = 0;
+  bool tripped_ = false;
+};
 
 }  // namespace McBopomofo
 

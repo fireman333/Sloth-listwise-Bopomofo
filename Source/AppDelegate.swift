@@ -188,6 +188,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
         LanguageModelManager.setupDataModelValueConverter()
         updateUserPhrases()
 
+        // Start loading the R-walk model off the main thread; the stock walk is
+        // used until it is ready (or forever, if it is missing or fails).
+        AFMNeuralSelector.shared.syncWithPreferences()
+
         if UserDefaults.standard.object(forKey: kCheckUpdateAutomatically) == nil {
             UserDefaults.standard.set(true, forKey: kCheckUpdateAutomatically)
             UserDefaults.standard.synchronize()

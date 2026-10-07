@@ -46,6 +46,8 @@ class KeyHandlerBopomofoTests: XCTestCase {
         Preferences.keyboardLayout = .standard
         Preferences.switchInputSourceUponShiftLetterKeyComboEnabled = false
         LanguageModelManager.loadDataModels()
+        // Stock walk only: these tests pin upstream McBopomofo behavior.
+        AFMNeuralSelector.resetForTesting()
         handler = KeyHandler()
         handler.inputMode = .bopomofo
     }
@@ -54,6 +56,14 @@ class KeyHandlerBopomofoTests: XCTestCase {
         Preferences.switchInputSourceUponShiftLetterKeyComboEnabled = savedSwitchInputSourceUponShiftLetterKeyComboEnabled
         Preferences.chineseConversionEnabled = chineseConversionEnabled
         Preferences.keyboardLayout = savedKeyboardLayout
+    }
+
+    /// The input mode literals in KeyHandler.mm must match the modes declared in
+    /// the app's Info.plist (the test host is the app).
+    func testInputModesMatchInfoPlist() throws {
+        let dict = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "ComponentInputModeDict") as? [String: Any])
+        let modes = try XCTUnwrap(dict["tsInputModeListKey"] as? [String: Any])
+        XCTAssertEqual(Set(modes.keys), [InputMode.bopomofo.rawValue, InputMode.plainBopomofo.rawValue])
     }
 
     func testSyncWithPreferences() {

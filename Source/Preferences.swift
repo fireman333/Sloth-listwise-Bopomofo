@@ -59,6 +59,9 @@ private let kShiftEnterEnabledKey = "ShiftEnterEnabled"
 private let kRepeatedPunctuationToSelectCandidateEnabledKey =
     "RepeatedPunctuationToSelectCandidateEnabled"
 private let kUseCustomUserPhraseLocation = "UseCustomUserPhraseLocation"
+// Hidden (no UI) R-walk switches, set with `defaults write`.
+private let kNeuralWalkEnabledKey = "AFMNeuralWalkEnabled"
+private let kNeuralWalkAlphaKey = "AFMNeuralWalkAlpha"
 private let kCustomUserPhraseLocation = "CustomUserPhraseLocation"
 
 private let kDefaultCandidateListTextSize: CGFloat = 16
@@ -244,6 +247,8 @@ class Preferences: NSObject {
             kRepeatedPunctuationToSelectCandidateEnabledKey,
             kUseCustomUserPhraseLocation,
             kCustomUserPhraseLocation,
+            kNeuralWalkEnabledKey,
+            kNeuralWalkAlphaKey,
         ]
     }
 
@@ -518,14 +523,44 @@ extension Preferences {
 
     @UserDefault(key: kSwitchInputSourceUponCommandKeyPressInputSourceIDKey, defaultValue: "com.apple.keylayout.ABC")
     static var switchInputSourceUponCommandKeyPressInputSourceID: String
+
+    /// Hidden: selects the composing buffer with R-walk (Bopomofo mode only)
+    /// when the R model is loaded. Read on every activation.
+    @UserDefault(key: kNeuralWalkEnabledKey, defaultValue: true)
+    @objc static var neuralWalkEnabled: Bool
+
+    /// Hidden: weight of the neural character scores inside the walk. 0 makes
+    /// selection identical to stock McBopomofo. Read on every activation.
+    @UserDefault(key: kNeuralWalkAlphaKey, defaultValue: 0.5)
+    @objc static var neuralWalkAlpha: Double
 }
 
 @objc class UserPhraseLocationHelper: NSObject {
-    @objc static var defaultUserPhraseLocation: String {
+    /// Folder name under ~/Library/Application Support. Distinct from stock
+    /// McBopomofo so both input methods can be installed side by side.
+    @objc static let applicationSupportFolderName = "Sloth-listwise-Bopomofo"
+
+    /// ~/Library/Application Support/Sloth-listwise-Bopomofo
+    @objc static var applicationSupportRoot: String {
         let paths = NSSearchPathForDirectoriesInDomains(
             .applicationSupportDirectory, .userDomainMask, true)
         let appSupportPath = paths.first!
-        return (appSupportPath as NSString).appendingPathComponent("McBopomofo")
+        return (appSupportPath as NSString).appendingPathComponent(applicationSupportFolderName)
+    }
+
+    /// <root>/models. Always under the application-support root, never under a
+    /// custom user phrase location.
+    @objc static var modelsDirectory: String {
+        (applicationSupportRoot as NSString).appendingPathComponent("models")
+    }
+
+    /// <root>/models/r-walk, where the R-walk model files live.
+    @objc static var rWalkModelDirectory: String {
+        (modelsDirectory as NSString).appendingPathComponent("r-walk")
+    }
+
+    @objc static var defaultUserPhraseLocation: String {
+        applicationSupportRoot
     }
 }
 

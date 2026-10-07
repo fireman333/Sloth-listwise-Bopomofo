@@ -270,4 +270,13 @@ if (ENABLE_TEST AND RESCORER_SLOTH)
         BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
     include(GoogleTest)
     gtest_discover_tests(neural_walk_test DISCOVERY_MODE PRE_TEST)
+
+    # Model-free tests: score cache, circuit breaker, split walk (fake scorer).
+    add_executable(neural_walk_cache_test neural_walk_cache_test.cpp neural_walk.h)
+    target_include_directories(neural_walk_cache_test PRIVATE "${_engine_dir}" "${_engine_dir}/gramambular2")
+    target_link_libraries(neural_walk_cache_test sloth_rescorer McBopomofoLMLib gramambular2_lib GTest::gtest_main)
+    target_compile_definitions(neural_walk_cache_test PRIVATE DATA_TXT="${_engine_dir}/../Data/data.txt")
+    set_target_properties(neural_walk_cache_test PROPERTIES
+        BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${CMAKE_BUILD_RPATH}")
+    gtest_discover_tests(neural_walk_cache_test DISCOVERY_MODE PRE_TEST)
 endif ()

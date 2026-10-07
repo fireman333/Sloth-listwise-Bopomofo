@@ -83,6 +83,17 @@ static void LTLoadVariantAnnotatorData()
     }
 }
 
++ (void)resetUserOverrideModelForTesting
+{
+    gUserOverrideModel = McBopomofo::UserOverrideModel(kUserOverrideModelCapacity, kObservedOverrideHalflife);
+}
+
++ (void)clearUserPhrasesForTesting
+{
+    gLanguageModelMcBopomofo.loadUserPhrases("", static_cast<size_t>(0));
+    gLanguageModelMcBopomofo.loadExcludedPhrases("", static_cast<size_t>(0));
+}
+
 + (void)loadDataModels
 {
     if (!gLanguageModelMcBopomofo.isDataModelLoaded()) {

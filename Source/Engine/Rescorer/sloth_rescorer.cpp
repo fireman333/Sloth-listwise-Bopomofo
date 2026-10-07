@@ -251,6 +251,10 @@ struct SlothRescorer::Impl {
     Ort::SessionOptions so;
     so.SetIntraOpNumThreads(opt.intraOpThreads > 0 ? opt.intraOpThreads : 1);
     so.SetInterOpNumThreads(1);
+    // Keep resident memory low in the long-lived IME process: no memory
+    // pattern planning and no CPU arena (tensors use plain malloc).
+    so.DisableMemPattern();
+    so.DisableCpuMemArena();
     std::string onnxPath = dir + "/onnx/" + opt.onnxFile;
     if (!std::ifstream(onnxPath)) throw std::runtime_error("cannot open " + onnxPath);
     session = std::make_unique<Ort::Session>(env, onnxPath.c_str(), so);

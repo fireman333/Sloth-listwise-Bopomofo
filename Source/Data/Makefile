@@ -48,11 +48,11 @@ clean:
 
 # FOR INTERNAL USE
 _install: tidy sort check all
-	@cp -a data.txt data-plain-bpmf.txt $(HOME)/Library/Input\ Methods/McBopomofo.app/Contents/Resources/
-	@pkill -HUP -f McBopomofo || echo McBopomofo is not running
+	@cp -a data.txt data-plain-bpmf.txt $(HOME)/Library/Input\ Methods/Sloth-listwise-Bopomofo.app/Contents/Resources/
+	@pkill -HUP -x Sloth-listwise-Bopomofo || echo Sloth-listwise-Bopomofo is not running
 _deploy: _install
-	@rsync -avx data.txt data-plain-bpmf.txt $(RHOST):"Library/Input\ Methods/McBopomofo.app/Contents/Resources/"
-	@test "$(RHOST)" && ssh $(RHOST) "pkill -HUP -f McBopomofo || echo McBopomofo is not running" || true
+	@rsync -avx data.txt data-plain-bpmf.txt $(RHOST):"Library/Input\ Methods/Sloth-listwise-Bopomofo.app/Contents/Resources/"
+	@test "$(RHOST)" && ssh $(RHOST) "pkill -HUP -x Sloth-listwise-Bopomofo || echo Sloth-listwise-Bopomofo is not running" || true
 
 sort: SHELL:=/bin/bash
 sort: export LC_ALL=C

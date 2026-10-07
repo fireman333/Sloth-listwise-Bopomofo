@@ -23,3 +23,6 @@ build-rescorer-*/
 27.0-*/
 build-bench/
 build-walk/
+build-release/
+build-selection*/
+*.profraw

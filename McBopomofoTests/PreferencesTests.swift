@@ -200,6 +200,50 @@ final class PreferencesTests {
         #expect(Preferences.chineseConversionStyle == .model)
     }
 
+    @Test("Test hidden R-walk switch and alpha defaults")
+    func testNeuralWalkDefaults() {
+        #expect(Preferences.neuralWalkEnabled == true)
+        #expect(Preferences.neuralWalkAlpha == 0.5)
+        #expect(Preferences.allKeys.contains("AFMNeuralWalkEnabled"))
+        #expect(Preferences.allKeys.contains("AFMNeuralWalkAlpha"))
+    }
+
+    @Test("Test hidden R-walk switch and alpha overrides")
+    func testNeuralWalkOverrides() {
+        Preferences.neuralWalkEnabled = false
+        #expect(Preferences.neuralWalkEnabled == false)
+        #expect(UserDefaults.standard.bool(forKey: "AFMNeuralWalkEnabled") == false)
+        Preferences.neuralWalkAlpha = 0.25
+        #expect(Preferences.neuralWalkAlpha == 0.25)
+        // Values written by `defaults write ... -float` / `-int` are NSNumbers.
+        UserDefaults.standard.set(NSNumber(value: Float(0.75)), forKey: "AFMNeuralWalkAlpha")
+        #expect(Preferences.neuralWalkAlpha == 0.75)
+        UserDefaults.standard.set(NSNumber(value: 0), forKey: "AFMNeuralWalkAlpha")
+        #expect(Preferences.neuralWalkAlpha == 0)
+    }
+
+    @Test("Test application support root and model directory paths")
+    func testApplicationSupportPaths() {
+        let appSupport = NSSearchPathForDirectoriesInDomains(
+            .applicationSupportDirectory, .userDomainMask, true
+        ).first!
+        let root = (appSupport as NSString).appendingPathComponent("Sloth-listwise-Bopomofo")
+        #expect(UserPhraseLocationHelper.applicationSupportRoot == root)
+        #expect(UserPhraseLocationHelper.modelsDirectory == root + "/models")
+        #expect(UserPhraseLocationHelper.rWalkModelDirectory == root + "/models/r-walk")
+        #expect(UserPhraseLocationHelper.defaultUserPhraseLocation == root)
+        #expect(!root.contains("McBopomofo"))
+    }
+
+    @Test("Test model directory ignores custom user phrase location")
+    func testModelDirectoryIgnoresCustomUserPhraseLocation() {
+        // Defaults are snapshotted in init() and restored in deinit.
+        let expected = UserPhraseLocationHelper.rWalkModelDirectory
+        Preferences.customUserPhraseLocation = NSTemporaryDirectory()
+        Preferences.useCustomUserPhraseLocation = true
+        #expect(UserPhraseLocationHelper.rWalkModelDirectory == expected)
+    }
+
 }
 
 final class CandidateKeyValidationTests {

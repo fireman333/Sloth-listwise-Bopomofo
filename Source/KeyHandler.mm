@@ -22,6 +22,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 #import "KeyHandler.h"
+#import "AFMNeuralSelector.h"
 #import "LanguageModelManager+Privates.h"
 #import "Mandarin.h"
 #import "McBopomofo-Swift.h"
@@ -45,8 +46,8 @@
 @import RomanNumbers;
 @import BopomofoBraille;
 
-InputMode InputModeBopomofo = @"org.openvanilla.inputmethod.McBopomofo.Bopomofo";
-InputMode InputModePlainBopomofo = @"org.openvanilla.inputmethod.McBopomofo.PlainBopomofo";
+InputMode InputModeBopomofo = @"io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo.Bopomofo";
+InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo.PlainBopomofo";
 
 @implementation KeyHandler {
     std::shared_ptr<Formosa::Gramambular2::LanguageModel> _emptySharedPtr;
@@ -166,6 +167,10 @@ InputMode InputModePlainBopomofo = @"org.openvanilla.inputmethod.McBopomofo.Plai
         Preferences.keyboardLayout = KeyboardLayoutStandard;
     }
     _languageModel->setExternalConverterEnabled(Preferences.chineseConversionStyle == ChineseConversionStyleModel);
+
+    // Picks up AFMNeuralWalkEnabled / AFMNeuralWalkAlpha and starts loading the
+    // R model in the background if it was switched on. Never blocks.
+    [AFMNeuralSelector.sharedSelector syncWithPreferences];
 }
 
 - (void)fixNodeWithReading:(NSString *)reading value:(NSString *)value originalCursorIndex:(size_t)originalCursorIndex useMoveCursorAfterSelectionSetting:(BOOL)flag
@@ -2535,7 +2540,10 @@ InputMode InputModePlainBopomofo = @"org.openvanilla.inputmethod.McBopomofo.Plai
 
 - (void)_walk
 {
-    _latestWalk = _grid->walk();
+    // R-walk only in Bopomofo mode; the selector itself falls back to the
+    // stock walk when the model is not usable (switch off, not loaded,
+    // failed, tripped, over the neural length limit). See AFMNeuralSelector.
+    _latestWalk = _inputMode == InputModeBopomofo ? [AFMNeuralSelector.sharedSelector walkGrid:*_grid] : _grid->walk();
 }
 
 - (InputStateChoosingCandidate *)_buildCandidateStateFromInputtingState:(InputStateInputting *)inputting useVerticalMode:(BOOL)useVerticalMode

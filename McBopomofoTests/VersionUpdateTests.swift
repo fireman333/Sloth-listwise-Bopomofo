@@ -27,19 +27,10 @@ import Testing
 
 @Suite("Version Update API Tests")
 final class VersionUpdateApiTests {
-    @Test("Version Update API Test")
-    func testFetchVersionUpdateInfo() async  {
-        let result = await withCheckedContinuation { continuation in
-            _ = VersionUpdateApi.check(forced: true) { result in
-                continuation.resume(returning: result)
-            }
-        }
-
-        switch result {
-        case let .failure(error):
-            Issue.record(error)
-        case .success:
-            break
-        }
+    // The upstream update endpoint (UpdateInfoEndpoint) is intentionally absent
+    // from this fork's Info.plist, so no update check request must be started.
+    @Test("Version Update API is disabled without an update endpoint")
+    func testUpdateCheckDisabledWithoutEndpoint() {
+        #expect(VersionUpdateApi.check(forced: true) { _ in } == nil)
     }
 }

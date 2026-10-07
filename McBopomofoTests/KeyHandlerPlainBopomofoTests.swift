@@ -32,6 +32,8 @@ class KeyHandlerPlainBopomofoTests: XCTestCase {
 
     override func setUpWithError() throws {
         LanguageModelManager.loadDataModels()
+        // Stock walk only: these tests pin upstream McBopomofo behavior.
+        AFMNeuralSelector.resetForTesting()
         handler = KeyHandler()
         handler.inputMode = .plainBopomofo
 

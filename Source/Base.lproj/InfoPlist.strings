@@ -1,5 +1,5 @@
-CFBundleName = "McBopomofo";
-CFBundleDisplayName = "McBopomofo";
+CFBundleName = "Sloth-listwise Bopomofo";
+CFBundleDisplayName = "Sloth-listwise Bopomofo";
 NSHumanReadableCopyright = "Copyright © 2011-2026 Mengjuei Hsieh et al.\nAll Rights Reserved.";
-"org.openvanilla.inputmethod.McBopomofo.Bopomofo" = "Bopomofo";
-"org.openvanilla.inputmethod.McBopomofo.PlainBopomofo" = "Plain Bopomofo";
+"io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo.Bopomofo" = "Sloth-listwise Bopomofo";
+"io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo.PlainBopomofo" = "Sloth-listwise Plain Bopomofo";

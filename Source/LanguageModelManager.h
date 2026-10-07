@@ -53,6 +53,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// The following methods are merely for testing.
 @interface LanguageModelManager ()
 + (void)loadDataModels;
+/// Testing only: forgets every observation of the user override model.
++ (void)resetUserOverrideModelForTesting;
+/// Testing only: empties the Bopomofo-mode user and excluded phrases.
++ (void)clearUserPhrasesForTesting;
 @end
 
 @interface LanguageModelManager ()
