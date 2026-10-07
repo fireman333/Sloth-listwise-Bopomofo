@@ -594,6 +594,11 @@ extension Preferences {
     static func setLearningEnabled(_ enabled: Bool) {
         learningEnabled = enabled
         AFMLearningStore.shared.setRecordingEnabled(enabled)
+        if !enabled {
+            // personal-finetune D5: a running training stops when learning
+            // is switched off (its result is never adopted).
+            AFMPersonalTrainingController.shared.cancelRun()
+        }
     }
 }
 

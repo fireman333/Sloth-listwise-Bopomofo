@@ -228,6 +228,12 @@ let kFakeHelperScript = #"""
         printf 'run = %s\nbucket_upper =\ntemperatures = 2.5\n' "$RUN" > "$ST/precise-r.conf"
         /bin/sleep "$DELAY"
         report adopted 0; status done 0; exit 0;;
+      adoptlate)
+        trap '' TERM
+        /bin/cp "$DIR/weights.bin" "$ST/weights.bin"
+        printf 'run = %s\nbucket_upper =\ntemperatures = 2.5\n' "$RUN" > "$ST/precise-r.conf"
+        /bin/sleep "$DELAY"
+        report adopted 0; status done 0; exit 0;;
       reject) report not_significant 0; status done 0; exit 0;;
       regress) report general_regression 0; exit 0;;
       crash) kill -SEGV $$;;
@@ -774,6 +780,55 @@ class PersonalVersionTests: PersonalTrainingTestCase {
         XCTAssertEqual(FileManager.default.contents(atPath: poolFile), poolBefore, "pool untouched")
         XCTAssertEqual(manifestOnDisk()?["factory_sha"] as? String, factorySHA)
         XCTAssertEqual(controller.automaticBlockReason(), .none, "next automatic run without 200 new segments")
+    }
+
+    /// Verify C4 (task 9.2): the version kept as `reverted_previous` after 「改回出廠模型」 is deleted too
+    /// when the factory model changes.
+    func testFactoryModelChangeAfterRevertDeletesAllVersions() throws {
+        XCTAssertEqual(try startAndWait(), "adopted")
+        XCTAssertEqual(try startAndWait(), "adopted")
+        controller.revertToFactory()
+        controller.waitUntilIdleForTesting()
+        XCTAssertEqual(versionDirectories(), ["v1", "v2"])
+        try writeFactoryModel(seed: 2)
+        refresh()
+        controller.waitUntilIdleForTesting()
+        XCTAssertEqual(versionDirectories(), [], "no version of the old factory model remains")
+        XCTAssertNil(manifestOnDisk()?["reverted_previous"])
+        XCTAssertNil(controller.previousVersion)
+    }
+
+    /// Verify C5 (task 9.2): a run that finishes after learning was switched off is not adopted.
+    func testRunFinishingAfterLearningOffNotAdopted() throws {
+        try setBehavior("adopt", delay: 1.5)
+        XCTAssertEqual(controller.startManualRun(), .started)
+        waitUntil { self.exists("status.json") }
+        learning = false
+        XCTAssertEqual(waitForRun(), "cancelled")
+        XCTAssertNil(controller.activeVersion)
+        XCTAssertEqual(versionDirectories(), [])
+        XCTAssertEqual(stagingEntries(), [])
+    }
+
+    /// A cancelled run whose helper still exits 0 with an adoptable result (SIGTERM ignored / too late)
+    /// is not adopted (spec "Cancel").
+    func testCancelledRunExitingZeroNotAdopted() throws {
+        try setBehavior("adoptlate", delay: 1.5)
+        XCTAssertEqual(controller.startManualRun(), .started)
+        waitUntil { self.exists("status.json") }
+        controller.cancelRun()
+        XCTAssertEqual(waitForRun(), "cancelled")
+        XCTAssertNil(controller.activeVersion)
+        XCTAssertEqual(versionDirectories(), [])
+    }
+
+    /// The background-activity completion is called even when a clear lands during the refresh.
+    func testRefreshCompletesWhenClearedMeanwhile() throws {
+        var done = false
+        controller.refresh { done = true }
+        controller.clearAll(completion: nil)
+        waitUntil { done }
+        XCTAssertTrue(done)
     }
 
     func testRevertToFactoryAndUsePrevious() throws {

@@ -432,6 +432,7 @@ static AFMPersonalTrainingController *gSharedController = nil;
     std::atomic<uint64_t> _queueGeneration;
     AFMPersonalRun *_run;
     NSInteger _eligibleCount;
+    NSInteger _adoptingVersion;  // v<N> being renamed from staging, or -1
     unsigned long long _scannedPoolSize;
     BOOL _scanPending;
     NSMutableArray<dispatch_block_t> *_scanWaiters;
@@ -511,6 +512,7 @@ static AFMPersonalTrainingController *gSharedController = nil;
         _helperThreads = 4;
         _failurePauseCount = 3;
         _eligibleCount = -1;
+        _adoptingVersion = -1;
         _queueGeneration = 0;
         _scanWaiters = [NSMutableArray array];
         _clearWaiters = [NSMutableArray array];
@@ -715,6 +717,10 @@ static AFMPersonalTrainingController *gSharedController = nil;
         [self _handleFactoryChange];
         [self _deleteUnreferencedVersions];
         [self refreshEligibleCountWithCompletion:completion];
+    } discarded:^{
+        // A clear happened meanwhile: still finish (the background-activity
+        // handler waits for this completion).
+        [self refreshEligibleCountWithCompletion:completion];
     }];
 }
 
@@ -727,7 +733,7 @@ static AFMPersonalTrainingController *gSharedController = nil;
     NSString *known = AFMStringValue(_manifest[@"factory_sha"]);
     if (known != nil && ![known isEqualToString:_factorySHA]) {
         os_log(AFMPersonalLog(), "factory model changed: personalized versions deleted");
-        for (NSString *key in @[ @"active", @"previous", @"versions", @"last_attempt", @"eligible_at_last_attempt", @"last_auto_attempt", @"paused", @"failure_paused", @"failures" ]) {
+        for (NSString *key in @[ @"active", @"previous", @"reverted_previous", @"versions", @"last_attempt", @"eligible_at_last_attempt", @"last_auto_attempt", @"paused", @"failure_paused", @"failures" ]) {
             [_manifest removeObjectForKey:key];
         }
         _manifest[@"factory_sha"] = _factorySHA;
@@ -746,6 +752,9 @@ static AFMPersonalTrainingController *gSharedController = nil;
     // Kept: active, previous and, after 「改回出廠模型」, the version that was
     // previous before it (spec: returning to factory keeps both versions).
     NSMutableSet<NSString *> *keep = [NSMutableSet set];
+    if (_adoptingVersion >= 0) {
+        [keep addObject:[NSString stringWithFormat:@"v%ld", (long)_adoptingVersion]];
+    }
     for (NSNumber *n in @[ (self.activeVersion != nil ? self.activeVersion : @(-1)), (self.previousVersion != nil ? self.previousVersion : @(-1)), (AFMNumberValue(_manifest[@"reverted_previous"]) != nil ? AFMNumberValue(_manifest[@"reverted_previous"]) : @(-1)) ]) {
         if (n.integerValue >= 0) {
             [keep addObject:[NSString stringWithFormat:@"v%ld", (long)n.integerValue]];
@@ -1135,8 +1144,13 @@ static NSString *AFMResultForExitCode(int code)
         return;
     }
     NSString *staging = record.stagingDirectory;
-    if (signaled || code != 0) {
-        NSString *fallback = record.killReason != nil ? record.killReason : (signaled ? @"failed:crash" : AFMResultForExitCode(code));
+    // A run that was cancelled (or killed) but exited 0 before the signal
+    // arrived, or that finished after learning was switched off, is never
+    // adopted (spec "Training triggers": runs only while learning is on;
+    // "Cancel": nothing is adopted).
+    NSString *forced = record.killReason != nil ? record.killReason : (![self _learningEnabled] ? @"cancelled" : nil);
+    if (signaled || code != 0 || forced != nil) {
+        NSString *fallback = forced != nil ? forced : (signaled ? @"failed:crash" : AFMResultForExitCode(code));
         [self _onQueue:^id {
             NSDictionary *report = AFMReadJSONFile([staging stringByAppendingPathComponent:@"report.json"]);
             AFMRemoveItem(staging);
@@ -1145,7 +1159,7 @@ static NSString *AFMResultForExitCode(int code)
             NSString *result = fallback;
             // The helper's own result is more precise (failed:<phase>) unless
             // we killed it or it crashed.
-            if (record.killReason == nil && !signaled && AFMStringValue(report[@"result"]).length > 0) {
+            if (forced == nil && !signaled && AFMStringValue(report[@"result"]).length > 0) {
                 result = report[@"result"];
             }
             [self _finishRun:record result:result report:report];
@@ -1157,6 +1171,8 @@ static NSString *AFMResultForExitCode(int code)
     // Exit 0: the gate was evaluated; adopt if the result says so (design D13).
     NSInteger version = MAX(MAX(self.activeVersion.integerValue, self.previousVersion.integerValue), [AFMNumberValue(_manifest[@"last_version"]) integerValue]) + 1;
     NSString *versionDirectory = [self _versionDirectory:version];
+    // Kept by _deleteUnreferencedVersions until the manifest refers to it.
+    _adoptingVersion = version;
     NSString *pool = [_memoryDirectory stringByAppendingPathComponent:AFMLearningSentencePoolFileName];
     NSString *modelDirectory = _modelDirectory;
     uint64_t generation = record.generation;
@@ -1192,12 +1208,14 @@ static NSString *AFMResultForExitCode(int code)
         AFMRemoveItem(staging);
         return outcome;
     } then:^(NSDictionary *outcome) {
+        self->_adoptingVersion = -1;
         NSString *result = (outcome[@"result"] != nil ? outcome[@"result"] : @"failed:adopt");
         if ([result isEqualToString:@"adopted"]) {
             [self _adoptVersion:version record:record report:outcome[@"report"]];
         }
         [self _finishRun:record result:result report:outcome[@"report"]];
     } discarded:^{
+        self->_adoptingVersion = -1;
         // Cleared while adopting: nothing is published; the clear deletes
         // the staged / renamed files after this block (store queue order).
         [self _finishRun:record result:@"discarded:generation" report:nil];
