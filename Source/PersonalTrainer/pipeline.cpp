@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <ctime>
 #include <fstream>
 #include <memory>
@@ -104,7 +105,8 @@ bool MakeDirs700(const std::string& path) {
 // Atomic text write (<path>.tmp + rename), mode 0600.
 bool WriteFile600(const std::string& path, const std::string& text) {
   std::string tmp = path + ".tmp";
-  int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  unlink(tmp.c_str());  // never write through a planted .tmp (symlink or other file)
+  int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (fd < 0) return false;
   fchmod(fd, 0600);
   size_t off = 0;
@@ -120,6 +122,11 @@ bool WriteFile600(const std::string& path, const std::string& text) {
   fsync(fd);
   close(fd);
   return rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+void RemoveTree(const std::string& path) {
+  std::error_code ec;
+  std::filesystem::remove_all(path, ec);
 }
 
 std::string RealDir(const std::string& p) {
@@ -269,6 +276,18 @@ class Runner {
       report_["error"] = "exception";
       rc = End(kExitFailed, "failed:" + (phase_.empty() ? std::string("setup") : phase_));
     }
+    if (hooks_.orphaned && hooks_.orphaned->load()) {
+      // The IME that spawned us is gone: nothing will read or clean staging.
+      if (!stagingDir_.empty()) RemoveTree(stagingDir_);
+      os_log(Log(), "run end: parent exited, staging removed");
+      return kExitCancelled;
+    }
+    if (hooks_.timedOut && hooks_.timedOut->load()) {
+      rc = End(kExitFailed, "failed:timeout");
+      if (!stagingDir_.empty())
+        for (const char* f : {"weights.bin", "weights.bin.tmp", "precise-r.conf", "precise-r.conf.tmp"})
+          unlink((stagingDir_ + "/" + f).c_str());
+    }
     report_["finished"] = IsoNow();
     timing_["total_s"] = R3(SecSince(t0_));
     report_["timing"] = timing_;
@@ -313,6 +332,7 @@ class Runner {
   int Limits() {
     uint64_t rss = hooks_.probes.residentBytes ? hooks_.probes.residentBytes() : 0;
     if (rss > peakRss_) peakRss_ = rss;
+    if (hooks_.timedOut && hooks_.timedOut->load()) return End(kExitFailed, "failed:timeout");
     if (hooks_.cancel && hooks_.cancel->load()) return End(kExitCancelled, "cancelled");
     if (rss > hooks_.rssLimitBytes) return End(kExitMemory, "failed:memory");
     if (args_.automatic) {
@@ -383,7 +403,10 @@ class Runner {
                        {"retracted_records", scan.retractedRecords},
                        {"ineligible_records", scan.ineligibleRecords},
                        {"dropped_segments", scan.droppedSegments},
-                       {"duplicate_segments", scan.duplicateSegments}};
+                       {"duplicate_segments", scan.duplicateSegments},
+                       {"overlong_lines", scan.overlongLines},
+                       {"window_start", scan.windowStart}};
+    if (int rc = Limits()) return rc;
     if (eligible_ < pack.data.minEligible) {
       report_["min_eligible"] = pack.data.minEligible;
       return End(kExitNotEnoughData, "not_enough_data");

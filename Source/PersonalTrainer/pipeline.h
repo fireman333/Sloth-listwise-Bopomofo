@@ -59,6 +59,12 @@ struct PipelineArgs {
 struct PipelineHooks {
   SystemProbes probes = SystemProbes::Real();
   const std::atomic<bool>* cancel = nullptr;  // set by SIGTERM
+  // Set (together with cancel) by the helper's own watchdog (Codex review
+  // 2026-10-08, finding 3): wall-clock deadline passed -> failed:timeout with
+  // the candidate files removed; parent IME gone -> the staging dir is deleted
+  // (nobody will adopt or clean it) and the run ends cancelled.
+  const std::atomic<bool>* timedOut = nullptr;
+  const std::atomic<bool>* orphaned = nullptr;
   double pollSeconds = 10;                    // power / thermal poll interval (automatic runs)
   uint64_t rssLimitBytes = 2ull << 30;
   // Called after each training step (tests: inject a retraction, a signal...).

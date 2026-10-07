@@ -1,8 +1,14 @@
 #include "pool_reader.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
-#include <fstream>
+#include <cstring>
+#include <fstream>  // nlohmann/json needs std::streambuf (Clang modules)
 #include <unordered_map>
 
 #include "nlohmann/json.hpp"
@@ -15,26 +21,78 @@ using nlohmann::json;
 
 namespace {
 
-bool ReadAll(const std::string& path, uint64_t offset, std::string* out, std::string* error) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
+// Streams the complete lines of [begin, end) of the file to fn (64 KiB reads,
+// never the whole file in memory). end = read.endOffset or EOF; when the range
+// is longer than read.maxPoolBytes (> 0) only its last maxPoolBytes are read and
+// the partial line at the window start is skipped. Lines longer than
+// read.maxLineBytes are skipped and counted in *overlong. *afterLast = offset
+// just after the last complete line (or the window start), *windowStart = the
+// first byte considered.
+template <typename F>
+bool StreamLines(const std::string& path, uint64_t begin, const ReadOptions& read,
+                 uint64_t* afterLast, uint64_t* windowStart, size_t* overlong,
+                 std::string* error, F&& fn) {
+  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
     if (error) *error = "cannot open " + path;
     return false;
   }
-  in.seekg(0, std::ios::end);
-  const std::streamoff size = in.tellg();
-  if (size < 0) {
+  struct stat st;
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    close(fd);
     if (error) *error = "cannot stat " + path;
     return false;
   }
-  if (offset >= static_cast<uint64_t>(size)) {
-    out->clear();
+  uint64_t end = static_cast<uint64_t>(st.st_size);
+  if (read.endOffset > 0 && read.endOffset < end) end = read.endOffset;
+  uint64_t start = begin;
+  if (start < end && read.maxPoolBytes > 0 && end - start > read.maxPoolBytes)
+    start = end - read.maxPoolBytes;
+  *windowStart = start;
+  *afterLast = start;
+  if (start >= end) {
+    close(fd);
     return true;
   }
-  in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-  out->resize(static_cast<size_t>(size - static_cast<std::streamoff>(offset)));
-  in.read(out->data(), static_cast<std::streamsize>(out->size()));
-  out->resize(static_cast<size_t>(in.gcount()));
+  // Skip the partial line at a window start that is not a line start.
+  bool dropping = false;
+  if (start > begin) {
+    char prev = 0;
+    dropping = pread(fd, &prev, 1, static_cast<off_t>(start - 1)) != 1 || prev != '\n';
+  }
+  bool tooLong = false;
+  std::string line;
+  std::vector<char> buf(64 * 1024);
+  uint64_t pos = start;
+  while (pos < end) {
+    size_t want = static_cast<size_t>(std::min<uint64_t>(buf.size(), end - pos));
+    ssize_t n = pread(fd, buf.data(), want, static_cast<off_t>(pos));
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    size_t i = 0;
+    while (i < static_cast<size_t>(n)) {
+      const char* nl = static_cast<const char*>(memchr(buf.data() + i, '\n', static_cast<size_t>(n) - i));
+      size_t stop = nl ? static_cast<size_t>(nl - buf.data()) : static_cast<size_t>(n);
+      if (!dropping) {
+        if (line.size() + (stop - i) > read.maxLineBytes) {
+          dropping = tooLong = true;
+          line.clear();
+          line.shrink_to_fit();
+        } else {
+          line.append(buf.data() + i, stop - i);
+        }
+      }
+      if (nl == nullptr) break;
+      if (!dropping) fn(std::string_view(line));
+      if (tooLong) ++*overlong;
+      dropping = tooLong = false;
+      line.clear();
+      *afterLast = pos + stop + 1;
+      i = stop + 1;
+    }
+    pos += static_cast<uint64_t>(n);
+  }
+  close(fd);
   return true;
 }
 
@@ -137,57 +195,59 @@ bool RecordSegments(const std::vector<PoolNode>& nodes, std::vector<Segment>* ou
   return true;
 }
 
-void ScanPoolBytes(std::string_view bytes, const Vocab& vocab, const SegmentOptions& opt,
-                   PoolScan* out) {
-  *out = PoolScan();
-  struct Rec {
-    int64_t tMs;
-    std::vector<PoolNode> nodes;
-  };
-  std::vector<Rec> recs;
-  out->scanOffset = ForEachLine(bytes, [&](std::string_view line) {
-    ++out->lines;
-    if (line.empty()) return;
-    json j = json::parse(line.begin(), line.end(), nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) {
-      ++out->malformedLines;
-      return;
-    }
-    auto v = j.find("v");
-    if (v == j.end() || !v->is_number_integer() || v->get<int64_t>() != 1) {
-      ++out->malformedLines;
-      return;
-    }
-    auto r = j.find("retract");
-    if (r != j.end()) {
-      if (r->is_number()) {
-        out->retracted.insert(ToMs(r->get<double>()));
-      } else {
-        ++out->malformedLines;
-      }
-      return;
-    }
-    auto t = j.find("t");
-    auto manual = j.find("manual");
-    auto nodes = j.find("nodes");
-    if (t == j.end() || !t->is_number() || manual == j.end() || !manual->is_boolean() ||
-        nodes == j.end() || !nodes->is_array()) {
-      ++out->malformedLines;
-      return;
-    }
-    Rec rec;
-    rec.tMs = ToMs(t->get<double>());
-    for (const auto& n : *nodes) {
-      if (!n.is_array() || n.size() < 2 || !n[0].is_string() || !n[1].is_string()) {
-        ++out->malformedLines;
-        return;
-      }
-      rec.nodes.push_back({n[0].get<std::string>(), n[1].get<std::string>()});
-    }
-    ++out->records;
-    recs.push_back(std::move(rec));
-  });
+namespace {
 
+struct PoolRecord {
+  int64_t tMs;
+  std::vector<PoolNode> nodes;
+};
+
+// Parses one pool line into out (counts, retractions) and recs.
+void ParsePoolLine(std::string_view line, PoolScan* out, std::vector<PoolRecord>* recs) {
+  ++out->lines;
+  if (line.empty()) return;
+  json j = json::parse(line.begin(), line.end(), nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded() || !j.is_object()) {
+    ++out->malformedLines;
+    return;
+  }
+  auto v = j.find("v");
+  if (v == j.end() || !v->is_number_integer() || v->get<int64_t>() != 1) {
+    ++out->malformedLines;
+    return;
+  }
+  auto r = j.find("retract");
+  if (r != j.end()) {
+    if (r->is_number()) {
+      out->retracted.insert(ToMs(r->get<double>()));
+    } else {
+      ++out->malformedLines;
+    }
+    return;
+  }
+  auto t = j.find("t");
+  auto manual = j.find("manual");
+  auto nodes = j.find("nodes");
+  if (t == j.end() || !t->is_number() || manual == j.end() || !manual->is_boolean() ||
+      nodes == j.end() || !nodes->is_array()) {
+    ++out->malformedLines;
+    return;
+  }
+  PoolRecord rec;
+  rec.tMs = ToMs(t->get<double>());
+  for (const auto& n : *nodes) {
+    if (!n.is_array() || n.size() < 2 || !n[0].is_string() || !n[1].is_string()) {
+      ++out->malformedLines;
+      return;
+    }
+    rec.nodes.push_back({n[0].get<std::string>(), n[1].get<std::string>()});
+  }
+  ++out->records;
+  recs->push_back(std::move(rec));
+}
+
+void FinishPoolScan(std::vector<PoolRecord>& recs, const Vocab& vocab, const SegmentOptions& opt,
+                    PoolScan* out) {
   // Eligible records -> filtered segments (file order).
   std::vector<Segment> all;
   for (auto& rec : recs) {
@@ -246,11 +306,24 @@ void ScanPoolBytes(std::string_view bytes, const Vocab& vocab, const SegmentOpti
   }
 }
 
+}  // namespace
+
+void ScanPoolBytes(std::string_view bytes, const Vocab& vocab, const SegmentOptions& opt,
+                   PoolScan* out) {
+  *out = PoolScan();
+  std::vector<PoolRecord> recs;
+  out->scanOffset = ForEachLine(bytes, [&](std::string_view line) { ParsePoolLine(line, out, &recs); });
+  FinishPoolScan(recs, vocab, opt, out);
+}
+
 bool ScanPool(const std::string& path, const Vocab& vocab, const SegmentOptions& options,
-              PoolScan* out, std::string* error) {
-  std::string bytes;
-  if (!ReadAll(path, 0, &bytes, error)) return false;
-  ScanPoolBytes(bytes, vocab, options, out);
+              PoolScan* out, std::string* error, const ReadOptions& read) {
+  *out = PoolScan();
+  std::vector<PoolRecord> recs;
+  if (!StreamLines(path, 0, read, &out->scanOffset, &out->windowStart, &out->overlongLines, error,
+                   [&](std::string_view line) { ParsePoolLine(line, out, &recs); }))
+    return false;
+  FinishPoolScan(recs, vocab, options, out);
   return true;
 }
 
@@ -272,25 +345,33 @@ Split SplitSegments(const std::vector<Segment>& segs, const SplitOptions& o) {
   return s;
 }
 
+namespace {
+
+void RetractionLine(std::string_view line, std::unordered_set<int64_t>* out) {
+  if (line.find("\"retract\"") == std::string_view::npos) return;
+  json j = json::parse(line.begin(), line.end(), nullptr, false);
+  if (j.is_discarded() || !j.is_object()) return;
+  auto v = j.find("v");
+  auto r = j.find("retract");
+  if (v == j.end() || !v->is_number_integer() || v->get<int64_t>() != 1) return;
+  if (r == j.end() || !r->is_number()) return;
+  out->insert(ToMs(r->get<double>()));
+}
+
+}  // namespace
+
 void ScanRetractionBytes(std::string_view bytes, std::unordered_set<int64_t>* out) {
-  ForEachLine(bytes, [&](std::string_view line) {
-    if (line.find("\"retract\"") == std::string_view::npos) return;
-    json j = json::parse(line.begin(), line.end(), nullptr, false);
-    if (j.is_discarded() || !j.is_object()) return;
-    auto v = j.find("v");
-    auto r = j.find("retract");
-    if (v == j.end() || !v->is_number_integer() || v->get<int64_t>() != 1) return;
-    if (r == j.end() || !r->is_number()) return;
-    out->insert(ToMs(r->get<double>()));
-  });
+  ForEachLine(bytes, [&](std::string_view line) { RetractionLine(line, out); });
 }
 
 bool ScanRetractions(const std::string& path, uint64_t offset, std::unordered_set<int64_t>* out,
-                     std::string* error) {
-  std::string bytes;
-  if (!ReadAll(path, offset, &bytes, error)) return false;
-  ScanRetractionBytes(bytes, out);
-  return true;
+                     std::string* error, const ReadOptions& read) {
+  ReadOptions r = read;
+  r.maxPoolBytes = 0;
+  r.endOffset = 0;
+  uint64_t after = 0, window = 0;
+  size_t overlong = 0;
+  return StreamLines(path, offset, r, &after, &window, &overlong, error, [&](std::string_view line) { RetractionLine(line, out); });
 }
 
 bool UsesRetracted(const Split& split, const std::unordered_set<int64_t>& retracted) {

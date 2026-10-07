@@ -419,3 +419,124 @@ TEST(HelperProcessTest, SigtermDuringTrainExitsWithin2s) {
   EXPECT_EQ(WEXITSTATUS(st), kExitCancelled);
   EXPECT_EQ(Report(mem, "sigterm")["result"], "cancelled");
 }
+
+// ---- Codex review 2026-10-08, finding 3: helper-side deadline and parent death ----
+
+TEST(PipelineTest, TimedOutHookEndsWithTimeoutAndNoCandidate) {
+  std::string mem = WriteSimPool("timeout", 1000, 400);
+  std::atomic<bool> cancel{false}, timedOut{false};
+  PipelineHooks h = QuietHooks();
+  h.cancel = &cancel;
+  h.timedOut = &timedOut;
+  h.onTrainStep = [&](int step) {
+    if (step == 2) timedOut = cancel = true;
+  };
+  EXPECT_EQ(RunPipeline(BaseArgs(mem, "timeout"), h), kExitFailed);
+  EXPECT_EQ(Report(mem, "timeout")["result"], "failed:timeout");
+  EXPECT_FALSE(fs::exists(mem + "/r-personal/staging/timeout/weights.bin"));
+  EXPECT_FALSE(fs::exists(mem + "/r-personal/staging/timeout/precise-r.conf"));
+}
+
+TEST(PipelineTest, OrphanedHookRemovesStaging) {
+  std::string mem = WriteSimPool("orphan", 1000, 400);
+  std::atomic<bool> cancel{false}, orphaned{false};
+  PipelineHooks h = QuietHooks();
+  h.cancel = &cancel;
+  h.orphaned = &orphaned;
+  h.onTrainStep = [&](int step) {
+    if (step == 2) orphaned = cancel = true;
+  };
+  EXPECT_EQ(RunPipeline(BaseArgs(mem, "orphan"), h), kExitCancelled);
+  EXPECT_FALSE(fs::exists(mem + "/r-personal/staging/orphan"));
+}
+
+TEST(PipelineTest, PoolCountsOverlongLines) {
+  std::string mem = WriteSimPool("overlong", 500, 0);
+  {
+    std::ofstream f(mem + "/sentences.jsonl", std::ios::app | std::ios::binary);
+    f << "{\"v\":1,\"t\":1,\"manual\":true,\"nodes\":[" << std::string(100000, ' ') << "]}\n";
+  }
+  EXPECT_EQ(RunPipeline(BaseArgs(mem, "overlong"), QuietHooks()), kExitNotEnoughData);
+  EXPECT_EQ(Report(mem, "overlong")["pool"]["overlong_lines"], 1);
+}
+
+namespace {
+pid_t SpawnHelper(const std::string& mem, const char* run, const std::vector<std::string>& extra) {
+  std::vector<std::string> args = {TRAINER_EXE, "--memory-dir", mem, "--model-dir", RWALK_MODEL_DIR,
+                                   "--pack-dir", PACK_DIR, "--data-txt", DATA_TXT, "--run-id", run,
+                                   "--replay-limit", "200"};
+  args.insert(args.end(), extra.begin(), extra.end());
+  pid_t pid = fork();
+  if (pid == 0) {
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+    dup2(devnull, 2);
+    std::vector<char*> argv;
+    for (auto& s : args) argv.push_back(s.data());
+    argv.push_back(nullptr);
+    execv(TRAINER_EXE, argv.data());
+    _exit(127);
+  }
+  return pid;
+}
+}  // namespace
+
+// The helper ends itself at its own deadline even if nobody kills it.
+TEST(HelperProcessTest, OwnDeadlineEndsRunWithTimeout) {
+  std::string mem = WriteSimPool("deadline", 1000, 400);
+  auto t0 = std::chrono::steady_clock::now();
+  pid_t pid = SpawnHelper(mem, "deadline", {"--deadline-seconds", "4"});
+  ASSERT_GT(pid, 0);
+  int st = 0;
+  waitpid(pid, &st, 0);
+  double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  printf("deadline 4 s -> exit after %.3f s\n", sec);
+  EXPECT_GE(sec, 3.9);
+  EXPECT_LE(sec, 4.0 + 2.5);
+  ASSERT_TRUE(WIFEXITED(st));
+  EXPECT_EQ(WEXITSTATUS(st), kExitFailed);
+  EXPECT_EQ(Report(mem, "deadline")["result"], "failed:timeout");
+  EXPECT_FALSE(fs::exists(mem + "/r-personal/staging/deadline/weights.bin"));
+  // Out-of-range values are usage errors.
+  pid = SpawnHelper(mem, "deadline-bad", {"--deadline-seconds", "0"});
+  waitpid(pid, &st, 0);
+  EXPECT_EQ(WEXITSTATUS(st), kExitUsage);
+}
+
+// The IME crashes (its process exits) while the helper runs: the helper
+// notices within ~2 s, removes its staging dir and exits.
+TEST(HelperProcessTest, ParentExitStopsHelperAndRemovesStaging) {
+  std::string mem = WriteSimPool("parent", 1000, 400);
+  int fds[2];
+  ASSERT_EQ(pipe(fds), 0);
+  pid_t parent = fork();
+  ASSERT_GE(parent, 0);
+  if (parent == 0) {  // stands in for the IME
+    close(fds[0]);
+    pid_t helper = SpawnHelper(mem, "parent", {});
+    (void)!write(fds[1], &helper, sizeof helper);
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    _exit(0);  // without killing or waiting for the helper
+  }
+  close(fds[1]);
+  pid_t helper = 0;
+  ASSERT_EQ(read(fds[0], &helper, sizeof helper), (ssize_t)sizeof helper);
+  close(fds[0]);
+  const std::string staging = mem + "/r-personal/staging/parent";
+  for (int i = 0; i < 100 && !fs::exists(staging); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_TRUE(fs::exists(staging));
+  int st = 0;
+  waitpid(parent, &st, 0);
+  auto t0 = std::chrono::steady_clock::now();
+  bool gone = false;
+  for (int i = 0; i < 100 && !gone; ++i) {  // <= 10 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    gone = kill(helper, 0) != 0 && errno == ESRCH;
+  }
+  double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  printf("parent exit -> helper gone after %.3f s\n", sec);
+  ASSERT_TRUE(gone) << "helper still running after its parent exited";
+  EXPECT_LE(sec, 2.5);
+  EXPECT_FALSE(fs::exists(staging));
+}

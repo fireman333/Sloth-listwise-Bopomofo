@@ -241,6 +241,105 @@ TEST(PoolReaderTest, LateRetractionFoundAfterScanOffset) {
   std::remove(path.c_str());
 }
 
+// Codex review 2026-10-08, finding 3: the pool is streamed with a line-length
+// cap and a byte window, so a huge or garbage pool cannot exhaust memory.
+namespace {
+std::string WritePoolFile(const char* tag, const std::string& bytes) {
+  const std::string path = "/tmp/afm_pool_reader_" + std::string(tag) + "_" + std::to_string(getpid()) + ".jsonl";
+  std::ofstream f(path, std::ios::binary);
+  f << bytes;
+  return path;
+}
+}  // namespace
+
+TEST(PoolReaderTest, StreamingMatchesInMemoryScan) {
+  std::string bytes;
+  for (int i = 0; i < 300; ++i)
+    bytes += Rec(100.0 + i, i % 3 == 0, {{"ㄓㄨㄥ", "中"}, {i % 2 ? "ㄨㄣˊ" : "ㄕㄨ", i % 2 ? "文" : "書"}, {"ㄏㄠˇ", i % 5 ? "好" : "書"}}) + "\n";
+  bytes += Retract(101.0) + "\n" + "{\"v\":1,\"t\":9";  // partial last line
+  const std::string path = WritePoolFile("stream", bytes);
+  PoolScan a, b;
+  std::string err;
+  ScanPoolBytes(bytes, TestVocab(), SegmentOptions(), &a);
+  ASSERT_TRUE(ScanPool(path, TestVocab(), SegmentOptions(), &b, &err)) << err;
+  EXPECT_EQ(a.scanOffset, b.scanOffset);
+  EXPECT_EQ(a.lines, b.lines);
+  EXPECT_EQ(a.records, b.records);
+  EXPECT_EQ(a.retractedRecords, b.retractedRecords);
+  ASSERT_EQ(a.segments.size(), b.segments.size());
+  for (size_t i = 0; i < a.segments.size(); ++i) {
+    EXPECT_EQ(a.segments[i].target, b.segments[i].target);
+    EXPECT_EQ(a.segments[i].tMs, b.segments[i].tMs);
+  }
+  EXPECT_EQ(b.windowStart, 0u);
+  std::remove(path.c_str());
+}
+
+TEST(PoolReaderTest, OverlongAndGarbageLinesSkipped) {
+  std::string bytes = Rec(1.0, true, {{"ㄘㄜˋ", "測"}, {"ㄕˋ", "試"}}) + "\n";
+  // An over-long line (valid JSON prefix, 200 KB) crossing several 64 KiB reads.
+  bytes += "{\"v\":1,\"t\":2.0,\"manual\":true,\"nodes\":[" + std::string(200000, ' ') + "]}\n";
+  bytes += std::string(5000, '\xff') + "\n";  // binary garbage, under the cap
+  bytes += "\n\n";
+  bytes += Rec(3.0, true, {{"ㄓㄨㄥ", "中"}, {"ㄨㄣˊ", "文"}}) + "\n";
+  const std::string path = WritePoolFile("overlong", bytes);
+  PoolScan s;
+  std::string err;
+  ReadOptions r;
+  r.maxLineBytes = 64 * 1024;
+  ASSERT_TRUE(ScanPool(path, TestVocab(), SegmentOptions(), &s, &err, r)) << err;
+  EXPECT_EQ(s.overlongLines, 1u);
+  EXPECT_EQ(s.malformedLines, 1u);  // the garbage line
+  EXPECT_EQ(s.records, 2u);
+  ASSERT_EQ(s.segments.size(), 2u);
+  EXPECT_EQ(s.segments[0].target, "測試");
+  EXPECT_EQ(s.segments[1].target, "中文");
+  EXPECT_EQ(s.scanOffset, bytes.size());
+  // An over-long retraction line is skipped too.
+  {
+    std::ofstream f(path, std::ios::binary | std::ios::app);
+    f << "{\"v\":1,\"retract\":3.0" << std::string(100000, ' ') << "}\n" << Retract(1.0) << "\n";
+  }
+  std::unordered_set<int64_t> late;
+  ASSERT_TRUE(ScanRetractions(path, s.scanOffset, &late, &err, r)) << err;
+  EXPECT_EQ(late.size(), 1u);
+  EXPECT_EQ(late.count(1000), 1u);
+  std::remove(path.c_str());
+}
+
+TEST(PoolReaderTest, PoolAboveTheCapReadsOnlyTheNewestWindow) {
+  std::string bytes;
+  std::vector<size_t> lineEnd;
+  for (int i = 0; i < 1000; ++i) {
+    bytes += Rec(1000.0 + i, true, {{"ㄓㄨㄥ", "中"}, {i % 2 ? "ㄨㄣˊ" : "ㄕㄨ", i % 2 ? "文" : "書"}}) + "\n";
+    lineEnd.push_back(bytes.size());
+  }
+  const std::string path = WritePoolFile("cap", bytes);
+  ReadOptions r;
+  r.maxPoolBytes = 10000;  // about 100 records
+  PoolScan s;
+  std::string err;
+  ASSERT_TRUE(ScanPool(path, TestVocab(), SegmentOptions(), &s, &err, r)) << err;
+  EXPECT_EQ(s.windowStart, bytes.size() - 10000);
+  EXPECT_EQ(s.scanOffset, bytes.size());
+  EXPECT_EQ(s.malformedLines, 0u) << "the partial line at the window start is skipped, not parsed";
+  EXPECT_GT(s.records, 50u);
+  EXPECT_LT(s.records, 150u);
+  ASSERT_EQ(s.segments.size(), 2u);
+  EXPECT_EQ(s.segments.back().tMs, 1999000);  // the newest record is in the window
+  // endOffset: stop at the end of record 499 (the IME's late-retraction check).
+  r.endOffset = lineEnd[499];
+  ASSERT_TRUE(ScanPool(path, TestVocab(), SegmentOptions(), &s, &err, r)) << err;
+  EXPECT_EQ(s.scanOffset, lineEnd[499]);
+  EXPECT_EQ(s.segments.back().tMs, 1499000);
+  // A window starting exactly at a line start keeps that line.
+  r.endOffset = 0;
+  r.maxPoolBytes = bytes.size() - lineEnd[899];
+  ASSERT_TRUE(ScanPool(path, TestVocab(), SegmentOptions(), &s, &err, r)) << err;
+  EXPECT_EQ(s.records, 100u);
+  std::remove(path.c_str());
+}
+
 TEST(PoolReaderTest, SplitSizes) {
   auto make = [](size_t n) {
     std::vector<Segment> v(n);
