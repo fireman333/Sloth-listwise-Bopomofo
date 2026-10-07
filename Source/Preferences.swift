@@ -93,13 +93,10 @@ private let kBopomofoFontAnnotationSupportMenuItemEnabledByInstalledFontsCheck_V
 
 /// True when this process hosts XCTest (McBopomofoTests uses the app as its
 /// TEST_HOST, which shares the installed IME's bundle id). Evaluated once.
-let isRunningUnderXCTest: Bool = {
-    let env = ProcessInfo.processInfo.environment
-    return env["XCTestConfigurationFilePath"] != nil
-        || env["XCTestSessionIdentifier"] != nil
-        || env["XCTestBundlePath"] != nil
-        || NSClassFromString("XCTestCase") != nil
-}()
+/// Only the env var xcodebuild sets for hosted tests is trusted, so a stray
+/// XCTest class in a production process can never redirect user data.
+let isRunningUnderXCTest: Bool =
+    ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
 // MARK: Property wrappers
 

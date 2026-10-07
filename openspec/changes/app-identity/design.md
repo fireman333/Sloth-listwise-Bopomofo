@@ -9,7 +9,7 @@
   2. Info.plist（`Source/McBopomofo-Info.plist`）：輸入模式 id（:27、:55、:86–87）、`InputMethodConnectionName = McBopomofo_1_Connection`（:91）、`TISInputSourceID`（:323，寫死而非引用 build setting）、更新端點（:328–331）、Services 選單「Add to McBopomofo User Phrases」（:118）。`CFBundleName = ${PRODUCT_NAME}`、`LSMinimumSystemVersion = ${MACOSX_DEPLOYMENT_TARGET}` 會自動跟著 build setting。
   3. 程式碼寫死：`Source/main.swift:73` connection name 常數（與 plist 重複定義）；`Source/KeyHandler.mm:48–49` 兩個輸入模式 id；`Source/Preferences.swift:528` 預設資料夾名 `"McBopomofo"`（`LanguageModelManager.mm:419` `dataFolderPath` 由此衍生所有使用者檔路徑）；`Source/Installer/AppDelegate.swift:27–32` 安裝路徑與 `killall` 對象。
   4. 顯示字串：`Source/{Base,en,zh-Hant}.lproj/InfoPlist.strings`（名稱與模式名，key 是模式 id）、`Source/{en,zh-Hant}.lproj/Localizable.strings`（:2、:5、:32、:98、:140/142）、`Source/Base.lproj/MainMenu.xib:17–35`、`Source/Installer/{en,zh-Hant}.lproj/InfoPlist.strings`、`Source/Installer/Base.lproj/MainMenu.xib:18–19`、Installer 完成訊息（`Source/Installer/AppDelegate.swift:255、271`）。
-- Preferences 一律用 `UserDefaults.standard`（無 suiteName），domain 自動等於 bundle id。
+- Preferences 正式環境用 `UserDefaults.standard`（無 suiteName），domain 自動等於 bundle id；經由 `Preferences.defaults` 存取，XCTest 下（`isRunningUnderXCTest`）改用 `<bundle id>.tests` suite，app-support root 改到暫存資料夾，避免測試寫入已安裝 IME 的資料（commit 8672758）。
 - UserOverrideModel 只存在記憶體（`LanguageModelManager.mm:38`），沒有檔案要搬。
 - ObjC 介面標頭以 module 名命名：`#import "McBopomofo-Swift.h"`（`KeyHandler.mm:27`、`LanguageModelManager.mm:26`、`ServiceProviderInputHelper.mm:25`），測試用 `@testable import McBopomofo`。Swift 類別都有明確 `@objc(...)` 名稱，xib 不依賴 module 名。
 - 已安裝的原版小麥注音佔用：`~/Library/Input Methods/McBopomofo.app`、bundle id / mode id / connection name 同上、`~/Library/Application Support/McBopomofo/`、defaults domain `org.openvanilla.inputmethod.McBopomofo`、程序名 `McBopomofo`。
@@ -47,7 +47,7 @@
 ### D4. 使用者資料與模型根目錄
 - 在 `@objc class UserPhraseLocationHelper`（`Preferences.swift:524`）上新增 `@objc static` 常數 `applicationSupportRoot = <Application Support>/Sloth-listwise-Bopomofo`、`modelsDirectory = root/models`、`rWalkModelDirectory = root/models/r-walk`（名稱固定為 `rWalkModelDirectory`，`selection-pipeline` 依此引用；`@objc` 讓 ObjC++ 也能取用），`defaultUserPhraseLocation` 回傳 root。
 - 模型目錄不跟隨「自訂使用者詞庫位置」：使用者把詞庫放 iCloud / Dropbox 時，不應把 ~15 MB 模型也同步出去。
-- 不建立 `models/`：由 `selection-pipeline` 的 `tools/install_models.sh` 負責。本 change 只保證根目錄在首次啟動時建立（沿用既有 `ensureFileExists` 流程）。
+- 不建立 `models/`：由 `selection-pipeline` 的 `tools/install_models.sh` 負責。本 change 只保證根目錄在第一次寫入使用者資料時建立（沿用上游 `ensureFileExists` 流程；2026-10-07 實測與上游相同）。
 - 不自動搬移（使用者決定）。替代方案「首次啟動時若舊資料夾存在就複製」被否決：會讓實驗中的 App 汙染判斷基準，也可能誤帶原版的排除詞。
 
 ### D5. 移除上游更新端點

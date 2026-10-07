@@ -188,6 +188,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
         LanguageModelManager.setupDataModelValueConverter()
         updateUserPhrases()
 
+        // Opt out of onnxruntime's bundled telemetry before any thread can
+        // create an Ort::Env (see Source/Engine/Rescorer/ort_env.h).
+        setenv("ORT_DISABLE_TELEMETRY", "1", 1)
+
         // Start loading the R-walk model off the main thread; the stock walk is
         // used until it is ready (or forever, if it is missing or fails).
         AFMNeuralSelector.shared.syncWithPreferences()

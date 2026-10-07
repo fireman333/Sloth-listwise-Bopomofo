@@ -39,7 +39,7 @@ p95 2.1 ms 遠低於 10 ms 預算；同步可直接沿用 `_walk` → UOM → `b
 - 建構時可注入：模型目錄、以及一個 scorer 函式（`std::function<CharLogProbTable(readings, extraChars)>`）；正式環境用 `SlothRescorer::charLogProbs` 包裝，測試用假 scorer。提供 `+resetForTesting`。
 - 背景載入：serial queue 上建 `SlothRescorer`，block 持有強參照；完成後 `dispatch_async(main)` 發佈，且只在狀態仍為 loading 時發佈。推論永遠只在 main thread，不需要鎖。
 - selector 與 `SlothRescorer` 以 heap 配置、刻意永不釋放（避免 IME 結束時 C++ 靜態解構順序問題）。
-- `walkGrid:inputMode:` 給 `KeyHandler._walk` 呼叫，回傳 `WalkResult`。
+- `walkGrid:` 給 `KeyHandler._walk` 呼叫，回傳 `WalkResult`。
 - 替代方案：塞進 `LanguageModelManager`——會讓之後精準模式的生命週期更亂，獨立類別較好拆。
 
 ### D3. 分數表快取 `NeuralScoreCache`（header-only，放在 `neural_walk.h`）
@@ -64,6 +64,7 @@ p95 2.1 ms 遠低於 10 ms 預算；同步可直接沿用 `_walk` → UOM → `b
 - **弱連結**（`-weak_library`）：dylib 不見時 dyld 不會讓 IME 啟動失敗。
 - 定義 `ORT_API_MANUAL_INIT`：onnxruntime C++ header 預設會在靜態初始化時呼叫 `OrtGetApiBase()`，弱連結下 dylib 缺席會在啟動時崩潰；改為 selector 先檢查 `&OrtGetApiBase != nullptr`，再呼叫 `Ort::InitApi()`，否則狀態設為 failed。
 - `MACOSX_DEPLOYMENT_TARGET` 提高到 ≥ 14（若 `app-identity` 已提高到 26.0 則沿用）。
+- **關閉 onnxruntime telemetry**（2026-10-07 實機發現）：預編譯 onnxruntime 1.30 內建 Microsoft 1DS telemetry，每次載入模型會 POST 到 Azure。所有 `Ort::Env` 一律經 `Source/Engine/Rescorer/ort_env.h` 的 `MakeOfflineOrtEnv` 建立（`ORT_DISABLE_TELEMETRY=1` + `DisableTelemetryEvents()`）；App 啟動時先設好環境變數，避免背景執行緒才寫入。升級 onnxruntime 後須以 `nettop` 重驗。
 - 替代方案：CMake 靜態庫 + Xcode 連結——使用者 2026-10-07 選擇直接加原始碼。
 
 ### D7. 開關：隱藏 UserDefaults key
@@ -86,7 +87,7 @@ p95 2.1 ms 遠低於 10 ms 預算；同步可直接沿用 `_walk` → UOM → `b
 - [快取用到舊分數] → key 含完整 readings 與各位置候選字（D3），同長度不同讀音也會失效；gtest 覆蓋。
 - [記憶體：onnxruntime + 13 MB 模型常駐] → 可接受；task 6.2 量 RSS。
 - [與已安裝小麥注音衝突] → 依賴 `app-identity`；在那之前只做 build 與 XCTest，不安裝。
-- [XCTest 的 host 是真的 App，會載入真實模型目錄] → selector 可注入目錄與 scorer，測試用假 scorer；需要真模型的測試在目錄不存在時 `XCTSkip`。
+- [XCTest 的 host 是真的 App（bundle id 與已安裝 IME 相同）] → selector 可注入目錄與 scorer，測試用假 scorer；另外在 XCTest 下偏好設定改用 `<bundle id>.tests` suite、app-support root 改到暫存資料夾（`Preferences.swift` 的 `isRunningUnderXCTest`，只看 `XCTestConfigurationFilePath`），需要真模型的測試只找 `$AFM_RWALK_MODEL_DIR` 或 clean_v1 開發路徑，不讀已安裝的模型。
 
 ## Migration Plan
 

@@ -17,6 +17,13 @@ The system SHALL load the R model from the `models/r-walk/` subdirectory of the 
 - **WHEN** the model directory does not exist
 - **THEN** the system uses the stock walk, logs the missing path once, and typing works normally
 
+### Requirement: No network access
+The system SHALL NOT open any network connection while loading or running the R model, including connections initiated by bundled inference libraries (for example usage telemetry). Model failures SHALL still fall back to the stock walk; disabling network access SHALL NOT add latency to key handling.
+
+#### Scenario: Typing with the model loaded
+- **WHEN** the input method loads the R model and the user types in Bopomofo mode
+- **THEN** the input method process opens no outbound network connection
+
 ### Requirement: Background loading
 The system SHALL load the R model off the main thread after the input method starts, and SHALL NOT block key handling, input-source activation, or candidate display while loading: activation and every keystroke during loading SHALL stay within the 10 ms p95 per-keystroke budget. Until loading completes, the stock walk SHALL be used.
 

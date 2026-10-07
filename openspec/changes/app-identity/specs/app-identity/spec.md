@@ -45,9 +45,9 @@ All preferences of this input method SHALL be stored in the user-defaults domain
 ### Requirement: Application-support root and model directory
 The input method's application-support root SHALL be `~/Library/Application Support/Sloth-listwise-Bopomofo/`. When no custom user-phrase location is configured, user phrase, excluded-phrase and phrase-replacement files SHALL be read from and created in this root. Model files for neural selection SHALL be located under `models/` of this root, with the R-walk model in `models/r-walk/`; the model directory SHALL be derived from the root regardless of any custom user-phrase location. The input method SHALL NOT read or write `~/Library/Application Support/McBopomofo/` unless the user explicitly configures that folder as the custom user-phrase location.
 
-#### Scenario: First launch with default settings
-- **WHEN** the input method is activated for the first time with no custom user-phrase location
-- **THEN** `~/Library/Application Support/Sloth-listwise-Bopomofo/` is created with the template user-data files, and nothing is created or modified in `~/Library/Application Support/McBopomofo/`
+#### Scenario: First write of user data with default settings
+- **WHEN** the input method first writes user data with no custom user-phrase location
+- **THEN** `~/Library/Application Support/Sloth-listwise-Bopomofo/` is created with the template user-data files only, and nothing is created or modified in `~/Library/Application Support/McBopomofo/`
 
 #### Scenario: Model directory with a custom user-phrase location
 - **WHEN** the user has configured a custom user-phrase location
