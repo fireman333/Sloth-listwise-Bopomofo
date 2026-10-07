@@ -13,6 +13,7 @@
 //                       [--parallel] [--latency 1,2,4]
 //                       [--walk-mode --alpha 1 [--sloth-onnx f] [--walk-reps n]]
 //                       [--override-weights merged.bin [--override-check n]]
+//                       [--nbest-only]
 // Outputs (in out-dir): result_cpp_{A,D,B,DB,E,DE}<tag>.jsonl, cpp_nbest.jsonl
 //   --nbest   take candidates from an existing nbest jsonl (e.g. out/nbest_lex.jsonl)
 //             instead of walkNBest (no grid; A = nbest[0]); use with --tag.
@@ -35,6 +36,9 @@
 //             creation (OrtApi::AddInitializer). Applies to --walk-mode. With --override-check n
 //             instead: load a plain and an overridden session, compare charLogProbs on the first
 //             n items (bit-identical count, max |diff|), and print load times and RSS as JSON.
+//   --nbest-only  (E5, personal-finetune task 1.5) only walkNBest(--k) per sentence, written
+//             to cpp_nbest_full<tag>.jsonl ({id, nbest: [text], ngram: [score, %.17g]}); no
+//             rescorers.
 //   --precise-mode  precise mode (precise_walk.h): R-walk N-best (--k, --alpha) + calibrated
 //             gate + R/Qwen fusion, with --sloth-dir as the R export and --qwen as the heavy
 //             model. --precise-config f loads PreciseConfig (key = value); without it the
@@ -635,6 +639,7 @@ int main(int argc, char** argv) {
   int walkReps = 0;
   std::string overridePath;
   size_t overrideCheck = 0;
+  bool nbestOnly = false;
   bool preciseMode = false, preciseDump = false;
   std::string preciseConfig;
   int preciseReps = 0;
@@ -678,6 +683,7 @@ int main(int argc, char** argv) {
     else if (a == "--walk-reps") walkReps = std::stoi(next());
     else if (a == "--override-weights") overridePath = next();
     else if (a == "--override-check") overrideCheck = std::stoul(next());
+    else if (a == "--nbest-only") nbestOnly = true;
     else {
       fprintf(stderr, "unknown arg %s\n", a.c_str());
       return 2;
@@ -712,6 +718,34 @@ int main(int argc, char** argv) {
     return 1;
   }
   fprintf(stderr, "LM loaded in %.0f ms\n", MsSince(t0));
+
+  // ---- N-best only (full-precision scores)
+  if (nbestOnly) {
+    std::ofstream f(outDir + "/cpp_nbest_full" + tag + ".jsonl", std::ios::binary);
+    size_t skipped = 0;
+    for (const Item& it : items) {
+      ReadingGrid grid(lm);
+      bool ok = true;
+      for (const std::string& r : it.reading) ok = grid.insertReading(r) && ok;
+      if (!ok) {
+        ++skipped;
+        f << json{{"id", it.id}, {"skipped", true}}.dump() << "\n";
+        continue;
+      }
+      json texts = json::array(), scores = json::array();
+      for (auto& r : grid.walkNBest(k)) {
+        std::string text;
+        for (auto& n : r.nodes) text += n->value();
+        texts.push_back(text);
+        char b[40];
+        snprintf(b, sizeof b, "%.17g", r.score);
+        scores.push_back(b);
+      }
+      f << json{{"id", it.id}, {"nbest", texts}, {"ngram", scores}}.dump() << "\n";
+    }
+    fprintf(stderr, "nbest-only k=%zu: %zu items, %zu skipped\n", k, items.size(), skipped);
+    return 0;
+  }
 
   // ---- precise mode
   if (preciseMode) {
