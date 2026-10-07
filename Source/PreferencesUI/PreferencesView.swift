@@ -31,8 +31,9 @@ private func localized(_ key: String) -> String {
 
 struct PreferencesView: View {
     @EnvironmentObject private var preferences: PreferencesViewModel
-    @State private var selectedTab: PreferencesTab = .basic
     @State private var measuredContentHeight: PreferencesContentHeight?
+
+    private var selectedTab: PreferencesTab { preferences.selectedTab }
 
     var body: some View {
         selectedTab.contentView
@@ -59,7 +60,7 @@ struct PreferencesView: View {
             }
             .background(
                 WindowToolbarConfigurator(
-                    selectedTab: $selectedTab,
+                    selectedTab: $preferences.selectedTab,
                     contentHeight: selectedContentHeight))
     }
 
@@ -756,6 +757,15 @@ struct SelectionModelPreferencesView: View {
 
             PreferenceRow(localize("Reading of 癌:")) {
                 Toggle(localize("Also accept ㄧㄢˊ (default: ㄞˊ only)"), isOn: $preferences.acceptYanReadingForAi)
+            }
+
+            PreferenceRow(localize("Learning:")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(localize("Learn from my typing"), isOn: $preferences.learningEnabled)
+                    Button(localize("Clear Learning Data…")) {
+                        preferences.clearLearningData()
+                    }
+                }
             }
 
             PreferenceRow {

@@ -821,28 +821,16 @@ void ReadingGrid::update(size_t loc, EditType editType) {
 bool ReadingGrid::overrideCandidate(
     size_t loc, const std::string* reading, const std::string& value,
     ReadingGrid::Node::OverrideType overrideType) {
-  if (loc > readings_.size()) {
-    return false;
-  }
-
-  std::vector<NodeInSpan> overlappingNodes =
-      overlappingNodesAt(loc == readings_.size() ? loc - 1 : loc);
-  NodeInSpan overridden;
-  for (NodeInSpan& nis : overlappingNodes) {
-    if (reading != nullptr && nis.node->reading() != *reading) {
-      continue;
-    }
-
-    if (nis.node->selectOverrideUnigram(value, overrideType)) {
-      overridden = nis;
-      break;
-    }
-  }
-
-  if (overridden.node == nullptr) {
+  std::optional<NodeInSpan> target = findOverrideTarget(loc, reading, value);
+  if (!target.has_value()) {
     // Nothing gets overridden.
     return false;
   }
+
+  NodeInSpan overridden = std::move(*target);
+  bool selected = overridden.node->selectOverrideUnigram(value, overrideType);
+  assert(selected);
+  (void)selected;
 
   for (size_t i = overridden.spanIndex;
        i < overridden.spanIndex + overridden.node->spanningLength() &&
@@ -861,6 +849,35 @@ bool ReadingGrid::overrideCandidate(
     }
   }
   return true;
+}
+
+std::optional<ReadingGrid::NodeInSpan> ReadingGrid::findOverrideTarget(
+    size_t loc, const std::string& value) const {
+  return findOverrideTarget(loc, nullptr, value);
+}
+
+std::optional<ReadingGrid::NodeInSpan> ReadingGrid::findOverrideTarget(
+    size_t loc, const std::string* reading, const std::string& value) const {
+  if (loc > readings_.size()) {
+    return std::nullopt;
+  }
+
+  std::vector<NodeInSpan> overlappingNodes =
+      overlappingNodesAt(loc == readings_.size() ? loc - 1 : loc);
+  for (NodeInSpan& nis : overlappingNodes) {
+    if (reading != nullptr && nis.node->reading() != *reading) {
+      continue;
+    }
+
+    const auto& unigrams = nis.node->unigrams();
+    if (std::any_of(unigrams.cbegin(), unigrams.cend(),
+                    [&value](const LanguageModel::Unigram& u) {
+                      return u.value() == value;
+                    })) {
+      return nis;
+    }
+  }
+  return std::nullopt;
 }
 
 std::vector<ReadingGrid::NodeInSpan> ReadingGrid::overlappingNodesAt(

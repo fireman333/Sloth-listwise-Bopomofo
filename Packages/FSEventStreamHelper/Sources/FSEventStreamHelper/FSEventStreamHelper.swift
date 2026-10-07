@@ -30,9 +30,18 @@ public protocol FSEventStreamHelperDelegate: AnyObject {
 public class FSEventStreamHelper : NSObject {
 
     public struct Event {
-        var path: String
-        var flags: FSEventStreamEventFlags
-        var id: FSEventStreamEventId
+        /// The path of the changed item. With file-level events (the stream is
+        /// created with kFSEventStreamCreateFlagFileEvents), this is the path
+        /// of the file itself, not only of its parent directory.
+        public var path: String
+        public var flags: FSEventStreamEventFlags
+        public var id: FSEventStreamEventId
+
+        public init(path: String, flags: FSEventStreamEventFlags, id: FSEventStreamEventId) {
+            self.path = path
+            self.flags = flags
+            self.id = id
+        }
     }
 
     public let path: String
@@ -70,7 +79,7 @@ public class FSEventStreamHelper : NSObject {
            [path] as CFArray,
            UInt64(kFSEventStreamEventIdSinceNow),
            1.0,
-           FSEventStreamCreateFlags(kFSEventStreamCreateFlagNone)
+           FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents)
         ) else {
             return false
         }

@@ -830,6 +830,102 @@ TEST(ReadingGridTest, OverrideResetTest) {
             (std::vector<std::string>{"年終", "槳襟"}));
 }
 
+TEST(ReadingGridTest, FindOverrideTargetMatchesOverrideCandidate) {
+  std::string sampleData(kSampleData);
+  sampleData += "ㄓㄨㄥㄐㄧㄤˇ 終講 -11.0\n";
+  sampleData += "ㄐㄧㄤˇㄐㄧㄣ 槳襟 -11.0\n";
+  auto lm = std::make_shared<SimpleLM>(sampleData.c_str());
+  const std::vector<std::string> readings{
+      "ㄍㄠ", "ㄎㄜ",    "ㄐㄧˋ",   "ㄍㄨㄥ",  "ㄙ",
+      "ㄉㄜ˙", "ㄋㄧㄢˊ", "ㄓㄨㄥ", "ㄐㄧㄤˇ", "ㄐㄧㄣ"};
+  auto makeGrid = [&]() {
+    auto grid = std::make_unique<ReadingGrid>(lm);
+    grid->setReadingSeparator("");
+    for (const auto& r : readings) {
+      grid->insertReading(r);
+    }
+    return grid;
+  };
+
+  // Every value present anywhere in the grid, including multi-character
+  // values whose node starts before or ends after the location.
+  std::set<std::string> values;
+  {
+    auto grid = makeGrid();
+    for (const auto& span : grid->spans()) {
+      for (size_t len = 1; len <= span.maxLength(); ++len) {
+        const auto& node = span.nodeOf(len);
+        if (node == nullptr) {
+          continue;
+        }
+        for (const auto& u : node->unigrams()) {
+          values.insert(u.value());
+        }
+      }
+    }
+  }
+  values.insert("不存在");
+  ASSERT_TRUE(values.count("高科技") > 0);
+  ASSERT_TRUE(values.count("終講") > 0);
+
+  size_t found = 0;
+  size_t multiCharSpanningBeyond = 0;
+  for (size_t loc = 0; loc <= readings.size(); ++loc) {
+    for (const auto& value : values) {
+      auto grid = makeGrid();
+      const ReadingGrid& constGrid = *grid;
+      std::optional<ReadingGrid::NodeInSpan> target =
+          constGrid.findOverrideTarget(loc, value);
+
+      // findOverrideTarget() must not change the grid.
+      for (const auto& span : grid->spans()) {
+        for (size_t len = 1; len <= span.maxLength(); ++len) {
+          const auto& node = span.nodeOf(len);
+          ASSERT_TRUE(node == nullptr || !node->isOverridden());
+        }
+      }
+
+      bool overridden = grid->overrideCandidate(loc, value);
+      ASSERT_EQ(overridden, target.has_value()) << loc << " " << value;
+      if (!target.has_value()) {
+        continue;
+      }
+      ++found;
+      ASSERT_TRUE(target->node->isOverridden()) << loc << " " << value;
+      ASSERT_EQ(target->node->value(), value);
+      ASSERT_EQ(grid->spans()[target->spanIndex].nodeOf(
+                    target->node->spanningLength()),
+                target->node);
+      if (target->node->spanningLength() > 1 &&
+          target->spanIndex + target->node->spanningLength() > loc + 1) {
+        ++multiCharSpanningBeyond;
+      }
+
+      // Exactly one node in the grid is overridden: the target.
+      size_t overriddenCount = 0;
+      for (const auto& span : grid->spans()) {
+        for (size_t len = 1; len <= span.maxLength(); ++len) {
+          const auto& node = span.nodeOf(len);
+          if (node != nullptr && node->isOverridden()) {
+            ++overriddenCount;
+            ASSERT_EQ(node, target->node);
+          }
+        }
+      }
+      ASSERT_EQ(overriddenCount, 1u);
+    }
+  }
+  ASSERT_GT(found, 0u);
+  ASSERT_GT(multiCharSpanningBeyond, 0u);
+
+  // Missing value and out-of-range location.
+  auto grid = makeGrid();
+  ASSERT_FALSE(grid->findOverrideTarget(0, "不存在").has_value());
+  ASSERT_FALSE(grid->findOverrideTarget(readings.size() + 1, "高").has_value());
+  ReadingGrid emptyGrid(lm);
+  ASSERT_FALSE(emptyGrid.findOverrideTarget(0, "高").has_value());
+}
+
 TEST(ReadingGridTest, DisambiguateCandidates) {
   std::string sampleData(kSampleData);
   sampleData += R"(

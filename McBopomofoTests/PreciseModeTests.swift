@@ -1097,6 +1097,9 @@ class SelectionModelPreferencesRenderTests: XCTestCase {
         savedPrecise = Preferences.preciseModeEnabled
         savedNeural = Preferences.neuralWalkEnabled
         Preferences.neuralWalkEnabled = true
+        // Shown as on (its default); the shared test setUp turns it off. Only
+        // the key is written, recording stays off.
+        Preferences.learningEnabled = true
         let fake = FakeNeuralScorer()
         fakes.append(fake)
         let selector = AFMNeuralSelector(scoreBlockForTesting: fake.block, loadDelay: 0)
@@ -1115,6 +1118,7 @@ class SelectionModelPreferencesRenderTests: XCTestCase {
         AFMNeuralSelector.resetForTesting()
         Preferences.preciseModeEnabled = savedPrecise
         Preferences.neuralWalkEnabled = savedNeural
+        Preferences.learningEnabled = false
         for dir in tempDirectories {
             try? FileManager.default.removeItem(atPath: dir)
         }

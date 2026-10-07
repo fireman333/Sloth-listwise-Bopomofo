@@ -24,6 +24,7 @@
 #import "LanguageModelManager.h"
 #import "LanguageModelManager+Privates.h"
 #import "McBopomofo-Swift.h"
+#import "AFMLearningStore.h"
 
 #include "UTF8Helper.h"
 #include "AssociatedPhrasesV2.h"
@@ -32,6 +33,9 @@
 
 static const int kUserOverrideModelCapacity = 500;
 static const double kObservedOverrideHalflife = 5400.0; // 1.5 hr.
+// Personal memory (design D1 / D2): long-term configuration.
+static const size_t kLearningUserOverrideModelCapacity = 5000;
+static const double kLearningObservedOverrideHalflife = 7.0 * 86400.0; // 7 days.
 
 static McBopomofo::McBopomofoLM gLanguageModelMcBopomofo;
 static McBopomofo::McBopomofoLM gLanguageModelPlainBopomofo;
@@ -90,7 +94,55 @@ static void LTLoadVariantAnnotatorData()
 
 + (void)resetUserOverrideModelForTesting
 {
+    gUserOverrideModel.clear();
+}
+
++ (void)resetLearningConfigurationForTesting
+{
     gUserOverrideModel = McBopomofo::UserOverrideModel(kUserOverrideModelCapacity, kObservedOverrideHalflife);
+}
+
++ (NSUInteger)userOverrideModelSizeForTesting
+{
+    return gUserOverrideModel.size();
+}
+
++ (BOOL)learningConfigurationActive
+{
+    return gUserOverrideModel.policy().latestPickWins && gUserOverrideModel.capacity() == kLearningUserOverrideModelCapacity;
+}
+
++ (void)configureLearningEnabled:(BOOL)enabled
+{
+    AFMLearningStore *store = AFMLearningStore.sharedStore;
+    BOOL active = self.learningConfigurationActive;
+    if (enabled) {
+        if (!active) {
+            // KeyHandler keeps a pointer to the global: move-assign in place.
+            gUserOverrideModel = McBopomofo::UserOverrideModel(kLearningUserOverrideModelCapacity, kLearningObservedOverrideHalflife,
+                McBopomofo::UserOverrideModel::Policy { true, true });
+            [store loadMemoryIntoModel:gUserOverrideModel];
+        }
+        [store setRecordingEnabled:YES];
+        return;
+    }
+    // The final save of the long-term model happens here, before the swap
+    // (a no-op if the preference setter already turned recording off).
+    [store setRecordingEnabled:NO];
+    if (active) {
+        gUserOverrideModel = McBopomofo::UserOverrideModel(kUserOverrideModelCapacity, kObservedOverrideHalflife);
+    }
+}
+
++ (void)clearLearningData
+{
+    [AFMLearningStore.sharedStore clearAllData];
+    gUserOverrideModel.clear();
+}
+
++ (void)flushLearningData
+{
+    [AFMLearningStore.sharedStore flush];
 }
 
 + (void)clearUserPhrasesForTesting

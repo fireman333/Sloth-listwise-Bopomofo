@@ -25,9 +25,14 @@
 #include "UserOverrideModel.h"
 
 #include <cassert>
+#include <charconv>
 #include <cmath>
+#include <istream>
 #include <list>
+#include <ostream>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -39,6 +44,8 @@ namespace McBopomofo {
 static constexpr double kDecayThreshold = 1.0 / 1048576.0;
 
 static constexpr char kEmptyNodeString[] = "()";
+
+static constexpr char kSerializationHeader[] = "AFM-UOM 1";
 
 // A scoring function that balances between "recent but infrequently observed"
 // and "old but frequently observed".
@@ -55,7 +62,13 @@ static std::string FormObservationKey(
         end);
 
 UserOverrideModel::UserOverrideModel(size_t capacity, double decayConstant)
-    : capacity_(capacity) {
+    : UserOverrideModel(capacity, decayConstant,
+                        Policy{/*latestPickWins=*/false,
+                               /*observeRefresh=*/false}) {}
+
+UserOverrideModel::UserOverrideModel(size_t capacity, double decayConstant,
+                                     Policy policy)
+    : capacity_(capacity), policy_(policy) {
   assert(capacity_ > 0);
   // NOLINTNEXTLINE(readability-magic-numbers)
   decayExponent_ = log(0.5) / decayConstant;
@@ -150,9 +163,16 @@ void UserOverrideModel::observe(
 UserOverrideModel::Suggestion UserOverrideModel::suggest(
     const Formosa::Gramambular2::ReadingGrid::WalkResult& currentWalk,
     size_t cursor, double timestamp) {
+  return suggestWithKey(currentWalk, cursor, timestamp).suggestion;
+}
+
+UserOverrideModel::SuggestionWithKey UserOverrideModel::suggestWithKey(
+    const Formosa::Gramambular2::ReadingGrid::WalkResult& currentWalk,
+    size_t cursor, double timestamp) {
   auto nodeIter = currentWalk.findNodeAt(cursor);
   std::string key = FormObservationKey(nodeIter, currentWalk.nodes.begin());
-  return suggest(key, timestamp);
+  Suggestion suggestion = suggest(key, timestamp);
+  return SuggestionWithKey{std::move(suggestion), std::move(key)};
 }
 
 void UserOverrideModel::observe(const std::string& key,
@@ -162,7 +182,8 @@ void UserOverrideModel::observe(const std::string& key,
   if (mapIter == lruMap_.end()) {
     auto keyValuePair = KeyObservationPair(key, Observation());
     Observation& observation = keyValuePair.second;
-    observation.update(candidate, timestamp, forceHighScoreOverride);
+    observation.update(candidate, timestamp, forceHighScoreOverride,
+                       policy_.latestPickWins);
 
     lruList_.push_front(keyValuePair);
     auto listIter = lruList_.begin();
@@ -183,7 +204,8 @@ void UserOverrideModel::observe(const std::string& key,
 
     auto& keyValuePair = *listIter;
     Observation& observation = keyValuePair.second;
-    observation.update(candidate, timestamp, forceHighScoreOverride);
+    observation.update(candidate, timestamp, forceHighScoreOverride,
+                       policy_.latestPickWins);
   }
 }
 
@@ -198,35 +220,205 @@ UserOverrideModel::Suggestion UserOverrideModel::suggest(const std::string& key,
   auto& keyValuePair = *listIter;
   const Observation& observation = keyValuePair.second;
 
-  std::string candidate;
-  bool forceHighScoreOverride = false;
-  double score = 0;
-  for (auto i = observation.overrides.begin(); i != observation.overrides.end();
-       ++i) {
-    const Override& o = i->second;
-    double overrideScore = Score(o.count, observation.count, o.timestamp,
-                                 timestamp, decayExponent_);
-    if (overrideScore == 0.0) {
+  auto best = observation.best(timestamp, decayExponent_);
+  if (best == observation.overrides.cend()) {
+    return UserOverrideModel::Suggestion{};
+  }
+  return UserOverrideModel::Suggestion{best->first,
+                                       best->second.forceHighScoreOverride};
+}
+
+bool UserOverrideModel::refresh(const std::string& key,
+                                const std::string& candidate,
+                                double timestamp) {
+  if (!policy_.observeRefresh) {
+    return false;
+  }
+
+  auto mapIter = lruMap_.find(key);
+  if (mapIter == lruMap_.end()) {
+    return false;
+  }
+
+  auto listIter = mapIter->second;
+  Observation& observation = listIter->second;
+  auto best = observation.best(timestamp, decayExponent_);
+  if (best == observation.overrides.cend() || best->first != candidate) {
+    return false;
+  }
+
+  observation.overrides[candidate].timestamp = timestamp;
+  lruList_.splice(lruList_.begin(), lruList_, listIter);
+  return true;
+}
+
+namespace {
+
+bool ContainsSeparator(const std::string& s) {
+  return s.find_first_of("\t\n") != std::string::npos;
+}
+
+void SplitByTab(std::string_view line, std::vector<std::string_view>* out) {
+  out->clear();
+  size_t start = 0;
+  while (true) {
+    size_t pos = line.find('\t', start);
+    if (pos == std::string_view::npos) {
+      out->push_back(line.substr(start));
+      return;
+    }
+    out->push_back(line.substr(start, pos - start));
+    start = pos + 1;
+  }
+}
+
+template <typename T>
+bool ParseNumber(std::string_view field, T* out) {
+  if (field.empty()) {
+    return false;
+  }
+  const char* begin = field.data();
+  const char* end = field.data() + field.size();
+  auto [ptr, ec] = std::from_chars(begin, end, *out);
+  return ec == std::errc() && ptr == end;
+}
+
+}  // namespace
+
+void UserOverrideModel::serialize(std::ostream& os) const {
+  os << kSerializationHeader << '\n';
+  // Shortest round-trip representation, locale-independent.
+  // NOLINTNEXTLINE(readability-magic-numbers)
+  char buf[64];
+  for (const auto& [key, observation] : lruList_) {
+    if (ContainsSeparator(key)) {
       continue;
     }
-
-    if (overrideScore > score) {
-      candidate = i->first;
-      forceHighScoreOverride = o.forceHighScoreOverride;
-      score = overrideScore;
+    for (const auto& [candidate, o] : observation.overrides) {
+      if (ContainsSeparator(candidate)) {
+        continue;
+      }
+      auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), o.timestamp);
+      if (ec != std::errc()) {
+        continue;
+      }
+      os << key << '\t' << candidate << '\t' << o.count << '\t'
+         << std::string_view(buf, ptr - buf) << '\t'
+         << (o.forceHighScoreOverride ? '1' : '0') << '\n';
     }
   }
-  return UserOverrideModel::Suggestion{candidate, forceHighScoreOverride};
+}
+
+bool UserOverrideModel::deserialize(std::istream& is) {
+  lruList_.clear();
+  lruMap_.clear();
+
+  std::string line;
+  if (!std::getline(is, line) || line != kSerializationHeader) {
+    return false;
+  }
+
+  std::list<KeyObservationPair> list;
+  std::map<std::string, std::list<KeyObservationPair>::iterator> map;
+  std::vector<std::string_view> fields;
+  // NOLINTNEXTLINE(readability-magic-numbers)
+  constexpr size_t kFieldCount = 5;
+
+  while (std::getline(is, line)) {
+    SplitByTab(line, &fields);
+    if (fields.size() != kFieldCount) {
+      return false;
+    }
+    const std::string_view key = fields[0];
+    const std::string_view candidate = fields[1];
+    size_t count = 0;
+    double timestamp = 0;
+    if (key.empty() || candidate.empty() || !ParseNumber(fields[2], &count) ||
+        count == 0 || !ParseNumber(fields[3], &timestamp) ||
+        !std::isfinite(timestamp) || (fields[4] != "0" && fields[4] != "1")) {
+      return false;
+    }
+
+    // serialize() writes the lines of a key consecutively.
+    if (list.empty() || list.back().first != key) {
+      std::string keyString(key);
+      if (map.find(keyString) != map.end()) {
+        return false;
+      }
+      list.emplace_back(keyString, Observation());
+      map.emplace(std::move(keyString), std::prev(list.end()));
+    }
+    Observation& observation = list.back().second;
+    auto [it, inserted] =
+        observation.overrides.emplace(std::string(candidate), Override());
+    if (!inserted) {
+      return false;
+    }
+    it->second.count = count;
+    it->second.timestamp = timestamp;
+    it->second.forceHighScoreOverride = fields[4] == "1";
+    observation.count += count;
+  }
+
+  if (is.bad()) {
+    return false;
+  }
+
+  // Keep the most recently used keys.
+  while (list.size() > capacity_) {
+    map.erase(list.back().first);
+    list.pop_back();
+  }
+
+  lruList_ = std::move(list);
+  lruMap_ = std::move(map);
+  return true;
 }
 
 void UserOverrideModel::Observation::update(const std::string& candidate,
                                             double timestamp,
-                                            bool forceHighScoreOverride) {
+                                            bool forceHighScoreOverride,
+                                            bool latestPickWins) {
+  if (latestPickWins) {
+    for (auto it = overrides.begin(); it != overrides.end();) {
+      if (it->first == candidate) {
+        ++it;
+      } else {
+        it = overrides.erase(it);
+      }
+    }
+  }
+
   count++;
   auto& o = overrides[candidate];
   o.timestamp = timestamp;
   o.count++;
   o.forceHighScoreOverride = forceHighScoreOverride;
+
+  if (latestPickWins) {
+    count = o.count;
+  }
+}
+
+std::map<std::string, UserOverrideModel::Override>::const_iterator
+UserOverrideModel::Observation::best(double timestamp,
+                                     double decayExponent) const {
+  auto result = overrides.cend();
+  double score = 0;
+  for (auto i = overrides.cbegin(); i != overrides.cend(); ++i) {
+    const Override& o = i->second;
+    double overrideScore =
+        Score(o.count, count, o.timestamp, timestamp, decayExponent);
+    if (overrideScore == 0.0) {
+      continue;
+    }
+
+    if (overrideScore > score) {
+      result = i;
+      score = overrideScore;
+    }
+  }
+  return result;
 }
 
 static double Score(size_t eventCount, size_t totalCount, double eventTimestamp,

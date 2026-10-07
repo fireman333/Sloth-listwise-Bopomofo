@@ -177,15 +177,33 @@ class McBopomofoInputMethodController: IMKInputController {
         currentClient = client
 
         keyHandler.clear()
+        // Personal memory (design D2): no-op unless the learning switch
+        // changed since the last activation.
+        LanguageModelManager.configureLearning(enabled: Preferences.learningEnabled)
+        AFMLearningStore.shared.clientProcessIdentifier = Self.processIdentifier(of: client)
         keyHandler.syncWithPreferences()
+        // First-run learning notice (design D12): shown once, 1 s later,
+        // without taking focus from the client.
+        MainActor.assumeIsolated { LearningNoticeController.shared.scheduleIfNeeded() }
 
         (NSApp.delegate as? AppDelegate)?.checkForUpdate()
+    }
+
+    /// Process identifier of the client application, 0 when unknown. Used to
+    /// pause learning only while the client itself holds secure input.
+    static func processIdentifier(of client: Any!) -> pid_t {
+        guard let bundleID = (client as? IMKTextInput)?.bundleIdentifier(),
+            let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+        else { return 0 }
+        return app.processIdentifier
     }
 
     override func deactivateServer(_ client: Any!) {
         currentClient = nil
         keyHandler.clear()
         self.handle(state: .Deactivated(), client: client)
+        // Save pending memory changes, including a refresh by this commit.
+        LanguageModelManager.flushLearningData()
     }
 
     override func setValue(_ value: Any!, forTag tag: Int, client: Any!) {
@@ -472,6 +490,9 @@ extension McBopomofoInputMethodController {
     }
 
     private func commit(text: String, client: Any!) {
+        // Personal memory (design D4): the one place text reaches the client;
+        // the record keeps the text before Simplified Chinese conversion.
+        keyHandler.recordCommittedText(text)
 
         func convertToSimplifiedChineseIfRequired(_ text: String) -> String {
             if !Preferences.chineseConversionEnabled {

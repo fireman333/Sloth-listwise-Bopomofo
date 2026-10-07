@@ -291,6 +291,18 @@ class ReadingGrid {
                          Node::OverrideType overrideType =
                              Node::OverrideType::kOverrideValueWithHighScore);
 
+  // A node along with the starting location of its span in the grid.
+  struct NodeInSpan {
+    NodePtr node;
+    size_t spanIndex = 0;
+  };
+
+  // Returns the node that overrideCandidate(loc, value) would override,
+  // without changing the grid, or std::nullopt if no node overlapping loc has
+  // a unigram with the value.
+  [[nodiscard]] std::optional<NodeInSpan> findOverrideTarget(
+      size_t loc, const std::string& value) const;
+
   // A span is a collection of nodes that share the same starting location.
   class Span {
    public:
@@ -356,10 +368,12 @@ class ReadingGrid {
                          const std::string& value,
                          Node::OverrideType overrideType);
 
-  struct NodeInSpan {
-    NodePtr node;
-    size_t spanIndex = 0;
-  };
+  // Shared by overrideCandidate() and findOverrideTarget(): the first node
+  // overlapping loc (in overlappingNodesAt() order) that has a unigram with
+  // the value and, if reading is not nullptr, the same reading.
+  std::optional<NodeInSpan> findOverrideTarget(size_t loc,
+                                               const std::string* reading,
+                                               const std::string& value) const;
 
   // Find all nodes that overlap with the location. The return value is a list
   // of nodes along with their starting location in the grid.

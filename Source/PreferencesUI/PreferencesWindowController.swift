@@ -88,6 +88,11 @@ final class PreferencesWindowController: NSWindowController {
         }
     }
 
+    /// Switches the window to a tab (e.g. 「選字模型」 from the learning notice).
+    func select(tab: PreferencesTab) {
+        preferences.selectedTab = tab
+    }
+
     func showAndActivate() {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)

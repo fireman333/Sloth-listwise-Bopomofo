@@ -64,6 +64,9 @@ private let kNeuralWalkEnabledKey = "AFMNeuralWalkEnabled"
 private let kNeuralWalkAlphaKey = "AFMNeuralWalkAlpha"
 private let kPreciseModeEnabledKey = "AFMPreciseModeEnabled"
 private let kAcceptYanReadingForAiKey = "AFMAcceptYanReadingForAi"
+// Personal memory (design D10).
+private let kLearningEnabledKey = "AFMLearningEnabled"
+private let kLearningNoticeShownKey = "AFMLearningNoticeShown"
 private let kCustomUserPhraseLocation = "CustomUserPhraseLocation"
 
 private let kDefaultCandidateListTextSize: CGFloat = 16
@@ -275,6 +278,8 @@ class Preferences: NSObject {
             kNeuralWalkAlphaKey,
             kPreciseModeEnabledKey,
             kAcceptYanReadingForAiKey,
+            kLearningEnabledKey,
+            kLearningNoticeShownKey,
         ]
     }
 
@@ -571,6 +576,25 @@ extension Preferences {
     /// to both language models on every activation.
     @UserDefault(key: kAcceptYanReadingForAiKey, defaultValue: false)
     @objc static var acceptYanReadingForAi: Bool
+
+    /// Personal memory: learn from manual picks (long-term, persistent
+    /// selection memory) and keep the local sentence pool. On by default.
+    /// The memory configuration is applied on every activation; use
+    /// setLearningEnabled(_:) to also stop or start recording immediately.
+    @UserDefault(key: kLearningEnabledKey, defaultValue: true)
+    @objc static var learningEnabled: Bool
+
+    /// Whether the one-time learning notice was shown.
+    @UserDefault(key: kLearningNoticeShownKey, defaultValue: false)
+    @objc static var learningNoticeShown: Bool
+
+    /// Writes the learning switch and applies it to recording at once (design
+    /// D2): turning it off saves pending picks once, then stops pool records
+    /// and saves; the memory configuration follows at the next activation.
+    static func setLearningEnabled(_ enabled: Bool) {
+        learningEnabled = enabled
+        AFMLearningStore.shared.setRecordingEnabled(enabled)
+    }
 }
 
 @objc class UserPhraseLocationHelper: NSObject {
@@ -611,6 +635,14 @@ extension Preferences {
     /// calibration (precise.conf).
     @objc static var qwenModelDirectory: String {
         (modelsDirectory as NSString).appendingPathComponent("qwen")
+    }
+
+    /// <root>/memory: personal-memory learning data (selection memory and
+    /// sentence pool). Always under the application-support root, never under
+    /// a custom user phrase location. Not created here; the learning store
+    /// creates it lazily with mode 0700.
+    @objc static var learningDataDirectory: String {
+        (applicationSupportRoot as NSString).appendingPathComponent("memory")
     }
 
     @objc static var defaultUserPhraseLocation: String {

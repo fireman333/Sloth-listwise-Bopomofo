@@ -4,6 +4,7 @@
 
 @import Foundation;
 
+#import "AFMLearningStore.h"
 #import "AFMNeuralSelector.h"
 #import "AFMPreciseController.h"
 #import "KeyHandler.h"

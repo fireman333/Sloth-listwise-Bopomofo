@@ -88,6 +88,8 @@ typedef NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable (^AFMNeuralSc
 @property (assign, nonatomic) BOOL enabled;
 @property (assign, nonatomic) double alpha;
 @property (readonly, nonatomic, nullable) NSString *modelDirectory;
+/// Identifies the loaded model (set when it becomes ready); nil before.
+@property (readonly, nonatomic, nullable) NSString *modelIdentifier;
 /// Wall time of the last completed load attempt, in ms (0 if none yet).
 @property (readonly, nonatomic) double lastLoadMilliseconds;
 /// Number of walks that ran a forward pass (cache misses), for tests.

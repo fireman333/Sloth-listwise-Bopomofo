@@ -95,6 +95,13 @@ final class PreferencesViewModel: NSObject, ObservableObject {
     @Published private(set) var neuralSelectorState: AFMNeuralSelectorState = .disabled
     @Published private(set) var preciseState: AFMPreciseState = .off
     @Published private(set) var basisKeyboardLayoutOptions: [KeyboardLayoutOption] = []
+    /// The tab shown in the preferences window; set by
+    /// PreferencesWindowController.select(tab:) (e.g. from the learning notice).
+    @Published var selectedTab: PreferencesTab = .basic
+
+    /// Asks the user to confirm clearing learning data (design D10). Replaced
+    /// in tests; the default shows a modal NSAlert.
+    var confirmClearLearningData: () -> Bool = PreferencesViewModel.runClearLearningDataAlert
 
     var keyboardLayout: KeyboardLayout {
         get { Preferences.keyboardLayout }
@@ -345,6 +352,40 @@ final class PreferencesViewModel: NSObject, ObservableObject {
             objectWillChange.send()
             Preferences.acceptYanReadingForAi = newValue
         }
+    }
+
+    /// Learning switch (AFMLearningEnabled, personal-memory design D10).
+    /// Stops or starts recording immediately; the memory configuration
+    /// follows no later than the next activation.
+    var learningEnabled: Bool {
+        get { Preferences.learningEnabled }
+        set {
+            objectWillChange.send()
+            Preferences.setLearningEnabled(newValue)
+        }
+    }
+
+    /// The 「清除學習資料…」 button: clears learning data after confirmation
+    /// (design D10 / D11). Returns whether the data was cleared.
+    @discardableResult
+    func clearLearningData() -> Bool {
+        guard confirmClearLearningData() else {
+            return false
+        }
+        LanguageModelManager.clearLearningData()
+        return true
+    }
+
+    static func runClearLearningDataAlert() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Clear learning data?", comment: "")
+        alert.informativeText = NSLocalizedString(
+            "This deletes the selections the input method has learned and the saved typing records on this Mac. User phrases and other settings are not changed.",
+            comment: "")
+        alert.addButton(withTitle: NSLocalizedString("Clear", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     var neuralStatus: SelectionModelStatus {

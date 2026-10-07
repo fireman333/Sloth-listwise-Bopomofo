@@ -586,6 +586,13 @@ class NeuralSelectorTests: XCTestCase {
         try runInProcessLatency(precise: false)
     }
 
+    /// Same with personal-memory learning on (task 3.6): long-term user
+    /// override model, every 40-syllable commit recorded to the sentence pool
+    /// (recordCommittedText timed separately, untimed in keystroke samples).
+    func testInProcessLatencyUpTo40SyllablesLearningOn() throws {
+        try runInProcessLatency(precise: false, learning: true)
+    }
+
     /// Same with precise mode ready (task 5.5): fake heavy model (30 ms, gate
     /// forced open), the end-of-key-event hook timed with each keystroke, and
     /// background results applied between keystrokes (apply time reported).
@@ -675,8 +682,32 @@ class NeuralSelectorTests: XCTestCase {
         return dir
     }
 
-    func runInProcessLatency(precise: Bool, breaker: Bool = true, realQwenThreads: Int? = nil) throws {
+    func runInProcessLatency(
+        precise: Bool, breaker: Bool = true, realQwenThreads: Int? = nil, learning: Bool = false
+    ) throws {
         let dir = try realModelDirectory()
+        let store = AFMLearningStore.shared
+        if learning {
+            try? FileManager.default.removeItem(atPath: UserPhraseLocationHelper.learningDataDirectory)
+            store.resetForTesting()
+            // Secure input is system-wide (another app may hold it); measure
+            // the recording path regardless.
+            store.secureInputCheck = { false }
+            Preferences.learningEnabled = true
+            LanguageModelManager.resetLearningConfigurationForTesting()
+            LanguageModelManager.configureLearning(enabled: true)
+            XCTAssertTrue(LanguageModelManager.learningConfigurationActive)
+            XCTAssertTrue(store.recordingEnabled)
+        }
+        defer {
+            if learning {
+                store.waitUntilIdleForTesting()
+                store.resetForTesting()
+                Preferences.learningEnabled = false
+                LanguageModelManager.configureLearning(enabled: false)
+                try? FileManager.default.removeItem(atPath: UserPhraseLocationHelper.learningDataDirectory)
+            }
+        }
         let jsonl = afmInputRoot.appendingPathComponent("bench/data/general/test.jsonl")
         guard let text = try? String(contentsOf: jsonl, encoding: .utf8) else {
             throw XCTSkip("bench test.jsonl not found at \(jsonl.path)")
@@ -753,6 +784,7 @@ class NeuralSelectorTests: XCTestCase {
         var samples: [(len: Int, ms: Double)] = []
         var applySamples: [(len: Int, ms: Double)] = []
         var payloadSamples: [(len: Int, ms: Double)] = []
+        var recordSamples: [(len: Int, ms: Double)] = []
         let delegate = PreciseTestDelegate()
         var len = 0
         var errors = 0
@@ -773,7 +805,27 @@ class NeuralSelectorTests: XCTestCase {
         }
         func resetRun() {
             if len > 0 {
-                handler.handle(input: enter, state: delegate.state) { delegate.state = $0 } errorCallback: {}
+                // Commit with Enter; report the committed text as the input
+                // method controller does (untimed in the keystroke samples).
+                var committed: [String] = []
+                var last = delegate.state
+                handler.handle(input: enter, state: delegate.state) { newState in
+                    if let c = newState as? InputState.Committing {
+                        committed.append(c.poppedText)
+                    } else if newState is InputState.Empty, let p = last as? InputState.NotEmpty {
+                        committed.append(p.composingBuffer)
+                    }
+                    last = newState
+                    delegate.state = newState
+                } errorCallback: {}
+                for text in committed {
+                    let t0 = DispatchTime.now().uptimeNanoseconds
+                    handler.recordCommittedText(text)
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                    if len >= maxLen {
+                        recordSamples.append((len, ms))
+                    }
+                }
             }
             newHandler()
             len = 0
@@ -923,11 +975,23 @@ class NeuralSelectorTests: XCTestCase {
             extra["payload_ms"] = latencyReport(payloadSamples).jsonObject
             extra["breaker"] = breaker
         }
+        extra["learning"] = learning
+        extra["record_committed_text"] = latencyReport(recordSamples).jsonObject
+        if learning {
+            store.waitUntilIdleForTesting()
+            let pool = (try? String(contentsOfFile: store.sentencePoolFilePath, encoding: .utf8)) ?? ""
+            extra["pool_records"] = pool.split(separator: "\n").count
+        }
         extra["slow_syllable_indices"] = Array(slowIndices.prefix(60))
         extra["slow_count"] = slowIndices.count
         let report = latencyReport(samples, extra: extra)
         print("LATENCY_JSON " + report.json)
         XCTAssertLessThan(report.p95, 10.0, "p95 full-keystroke latency must be < 10 ms")
+        if learning {
+            XCTAssertGreaterThan(recordSamples.count, 0)
+            XCTAssertLessThan(latencyReport(recordSamples).p95, 1.0, "p95 recordCommittedText (40 syllables) must be < 1 ms")
+            XCTAssertGreaterThan(extra["pool_records"] as? Int ?? 0, 0)
+        }
         if precise {
             XCTAssertGreaterThan(requests, 0)
             XCTAssertGreaterThan(applySamples.count, 0)

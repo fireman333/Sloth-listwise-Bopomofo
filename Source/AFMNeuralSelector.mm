@@ -64,6 +64,23 @@ static os_log_t AFMNeuralLog(void)
     return log;
 }
 
+// Identifies the loaded R model for the sentence pool (personal-memory D4):
+// "<model file name>:<size>:<mtime>", or "test" for a test scorer. Runs on
+// the load queue.
+static NSString *AFMModelIdentifier(NSString *modelDirectory)
+{
+    if (modelDirectory == nil) {
+        return @"test";
+    }
+    NSString *path = [modelDirectory stringByAppendingPathComponent:@"onnx/model_quantized.onnx"];
+    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    if (attributes == nil) {
+        return @"r-walk";
+    }
+    return [NSString stringWithFormat:@"%@:%llu:%lld", path.lastPathComponent, attributes.fileSize,
+                     (long long)attributes.fileModificationDate.timeIntervalSince1970];
+}
+
 // Production loader. Runs on the load queue. Returns a heap-allocated scorer
 // wrapping a heap-allocated SlothRescorer, both intentionally never freed, or
 // nullptr with *error set (*notFound = YES when the model directory is missing).
@@ -157,6 +174,7 @@ static AFMNeuralSelector *gSharedSelector = nil;
 @synthesize enabled = _enabled;
 @synthesize alpha = _alpha;
 @synthesize modelDirectory = _modelDirectory;
+@synthesize modelIdentifier = _modelIdentifier;
 @synthesize lastLoadMilliseconds = _lastLoadMilliseconds;
 @synthesize forwardCount = _forwardCount;
 @synthesize neuralWalkCount = _neuralWalkCount;
@@ -242,11 +260,14 @@ static AFMNeuralSelector *gSharedSelector = nil;
             error = exception.reason;
         }
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        NSString *identifier = nil;
         if (scorer != nullptr) {
             // Hand back the transient memory onnxruntime used while loading.
             malloc_zone_pressure_relief(NULL, 0);
+            identifier = AFMModelIdentifier(self->_modelDirectory);
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            self->_modelIdentifier = identifier;
             [self _publishScorer:scorer error:error notFound:notFound milliseconds:ms];
         });
     });

@@ -291,3 +291,11 @@
 "Telecommunications" = "Telecom";
 "Sports" = "Sports";
 "Computers" = "Computers";
+
+/* Personal memory (personal-memory) */
+"Learning:" = "Learning:";
+"Learn from my typing" = "Learn from my typing";
+"Clear Learning Data…" = "Clear Learning Data…";
+"Clear learning data?" = "Clear learning data?";
+"This deletes the selections the input method has learned and the saved typing records on this Mac. User phrases and other settings are not changed." = "This deletes the selections the input method has learned and the saved typing records on this Mac. User phrases and other settings are not changed.";
+"Clear" = "Clear";

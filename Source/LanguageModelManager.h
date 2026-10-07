@@ -49,6 +49,23 @@ NS_ASSUME_NONNULL_BEGIN
 /// pending background re-ranking request made before it is discarded.
 @property (class, readonly, nonatomic) NSUInteger reloadGeneration;
 
+/// Personal memory (design D2): with learning enabled, the user override
+/// model is the long-term one (5,000 contexts, 7-day half-life, latest pick
+/// wins, refresh on commit), loaded from the memory folder; otherwise the
+/// stock session-only model (500, 1.5 h). Compares the actual current
+/// configuration, so it is a cheap no-op when nothing changed. Main thread;
+/// called at launch and on every activation. Also turns the learning store's
+/// recording on (enabled) or off (disabled, with its one final save).
++ (void)configureLearningEnabled:(BOOL)enabled NS_SWIFT_NAME(configureLearning(enabled:));
+/// Whether the active user override model is the long-term configuration.
+@property (class, readonly, nonatomic) BOOL learningConfigurationActive;
+/// Clears all learning data (design D11): deletes the memory file, files set
+/// aside as unreadable and the sentence pool, and empties the in-memory model
+/// (keeping its configuration). Main thread.
++ (void)clearLearningData;
+/// Saves pending memory changes now (deactivateServer).
++ (void)flushLearningData;
+
 @property (class, readonly, nonatomic) NSString *dataFolderPath;
 @property (class, readonly, nonatomic) NSString *userPhrasesDataPathMcBopomofo;
 @property (class, readonly, nonatomic) NSString *userPhrasesDataPathPlainBopomofo;
@@ -62,8 +79,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// The following methods are merely for testing.
 @interface LanguageModelManager ()
 + (void)loadDataModels;
-/// Testing only: forgets every observation of the user override model.
+/// Testing only: forgets every observation of the user override model
+/// (keeps its configuration: stock or long-term).
 + (void)resetUserOverrideModelForTesting;
+/// Testing only: the stock model without saving anything, as at process
+/// start (the next configureLearning(enabled: true) loads the memory file).
++ (void)resetLearningConfigurationForTesting;
+/// Testing only: number of contexts in the user override model.
+@property (class, readonly, nonatomic) NSUInteger userOverrideModelSizeForTesting;
 /// Testing only: empties the Bopomofo-mode user and excluded phrases.
 + (void)clearUserPhrasesForTesting;
 /// Testing only: replaces the Bopomofo-mode user phrases with content

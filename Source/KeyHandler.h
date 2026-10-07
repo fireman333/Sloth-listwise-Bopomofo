@@ -83,7 +83,17 @@ extern InputMode InputModePlainBopomofo;
                                    prefixValue:(NSString *)pfxValue
                        associatedPhraseReading:(NSString *)phraseReading
                          associatedPhraseValue:(NSString *)phraseValue;
+/// Resets the composition. A non-empty composition is kept as the pending
+/// commit snapshot for recordCommittedText: (personal memory, design D4).
 - (void)clear;
+
+/// Personal memory (design D4 / D8): called by the input method controller
+/// with every text it commits, before Simplified Chinese conversion. If the
+/// text is the composing buffer of the snapshot taken by the last clear of a
+/// Bopomofo-mode composition, and learning is recording and secure input is
+/// off, appends a sentence-pool record and refreshes remembered suggestions
+/// committed unchanged. The snapshot is dropped either way.
+- (void)recordCommittedText:(NSString *)text;
 
 /// End-of-key-event hook for precise mode (design D1). Call once after each
 /// key event and after a candidate pick; pass the composing buffer if the
@@ -124,6 +134,9 @@ extern InputMode InputModePlainBopomofo;
 @property (assign, nonatomic, readonly) double lastPrecisePayloadMilliseconds;
 /// Test-only: re-evaluates the composing buffer without any change.
 - (void)rewalkForTesting;
+/// Test-only: what the user override model suggests for the current walk at
+/// the candidate cursor (store clock), or nil.
+- (nullable NSString *)userOverrideSuggestionForTesting;
 @end
 
 NS_ASSUME_NONNULL_END

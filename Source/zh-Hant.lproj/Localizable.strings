@@ -291,3 +291,11 @@
 "Telecommunications" = "通訊";
 "Sports" = "運動";
 "Computers" = "電腦";
+
+/* Personal memory (personal-memory) */
+"Learning:" = "學習：";
+"Learn from my typing" = "學習我的選字";
+"Clear Learning Data…" = "清除學習資料…";
+"Clear learning data?" = "要清除學習資料嗎？";
+"This deletes the selections the input method has learned and the saved typing records on this Mac. User phrases and other settings are not changed." = "這會刪除輸入法在這台 Mac 上學到的選字與保存的打字紀錄。使用者詞彙與其他設定不會改變。";
+"Clear" = "清除";

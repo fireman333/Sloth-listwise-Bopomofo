@@ -188,6 +188,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
         LanguageModelManager.setupDataModelValueConverter()
         updateUserPhrases()
 
+        // Personal memory (design D2): long-term memory loaded from
+        // <root>/memory when learning is on.
+        LanguageModelManager.configureLearning(enabled: Preferences.learningEnabled)
+
         // Opt out of onnxruntime's bundled telemetry before any thread can
         // create an Ort::Env (see Source/Engine/Rescorer/ort_env.h).
         setenv("ORT_DISABLE_TELEMETRY", "1", 1)
@@ -226,8 +230,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
 
     @MainActor
     @objc func showPreferences() {
+        showPreferences(tab: nil)
+    }
+
+    /// Shows the preferences window, optionally on a given tab.
+    @MainActor
+    func showPreferences(tab: PreferencesTab?) {
         if preferencesWindowController == nil {
             preferencesWindowController = PreferencesWindowController()
+        }
+        if let tab {
+            preferencesWindowController?.select(tab: tab)
         }
         preferencesWindowController?.showAndActivate()
     }
@@ -323,8 +336,65 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
     }
 }
 
+/// Decides whether a batch of file-system events in the watched user-phrase
+/// folder should reload user phrases. When the user-phrase folder is the
+/// application-support root (the default), the learning data under
+/// `<root>/memory` and the models under `<root>/models` live inside the
+/// watched tree; writes there must not reload user phrases.
+enum UserPhraseFolderEventFilter {
+    /// The folders whose events never reload user phrases.
+    static var defaultExcludedDirectories: [String] {
+        [UserPhraseLocationHelper.learningDataDirectory, UserPhraseLocationHelper.modelsDirectory]
+    }
+
+    /// Returns true if any event path is outside all excluded directories.
+    /// Both sides are canonicalized, so `/private/var/...` event paths match a
+    /// `/var/...` directory.
+    static func shouldReload(eventPaths: [String], excludedDirectories: [String]) -> Bool {
+        let excluded = excludedDirectories.map(canonicalPath)
+        return eventPaths.contains { path in
+            let canonical = canonicalPath(path)
+            return !excluded.contains { dir in
+                canonical == dir || canonical.hasPrefix(dir + "/")
+            }
+        }
+    }
+
+    /// Resolves symbolic links (including /var -> /private/var, which FSEvents
+    /// reports resolved) in the longest existing prefix of the path, and keeps
+    /// the rest as is, so a file that no longer exists (renamed or deleted)
+    /// still gets the same prefix as its existing parent folder.
+    static func canonicalPath(_ path: String) -> String {
+        var current = (path as NSString).standardizingPath
+        var trailing: [String] = []
+        while true {
+            if let resolved = realpath(current, nil) {
+                defer { free(resolved) }
+                var result = String(cString: resolved)
+                for component in trailing.reversed() {
+                    result = (result as NSString).appendingPathComponent(component)
+                }
+                return result
+            }
+            let parent = (current as NSString).deletingLastPathComponent
+            if parent.isEmpty || parent == current {
+                return (path as NSString).standardizingPath
+            }
+            trailing.append((current as NSString).lastPathComponent)
+            current = parent
+        }
+    }
+}
+
 extension AppDelegate: FSEventStreamHelperDelegate {
     func helper(_ helper: FSEventStreamHelper, didReceive events: [FSEventStreamHelper.Event]) {
+        guard
+            UserPhraseFolderEventFilter.shouldReload(
+                eventPaths: events.map(\.path),
+                excludedDirectories: UserPhraseFolderEventFilter.defaultExcludedDirectories)
+        else {
+            return
+        }
         DispatchQueue.main.async {
             LanguageModelManager.loadUserPhrases(
                 enableForPlainBopomofo: Preferences.enableUserPhrasesInPlainBopomofo)

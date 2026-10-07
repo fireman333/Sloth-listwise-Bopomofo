@@ -22,6 +22,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 #import "KeyHandler.h"
+#import "AFMLearningStore.h"
 #import "AFMNeuralSelector.h"
 #import "AFMPreciseController.h"
 #import "LanguageModelManager+Privates.h"
@@ -35,6 +36,7 @@
 #import <algorithm>
 #import <chrono>
 #import <cstdio>
+#import <map>
 #import <optional>
 #import <sstream>
 #import <string>
@@ -56,6 +58,36 @@ InputMode InputModePlainBopomofo = @"io.github.fireman333.inputmethod.Sloth-list
 struct AFMPreciseOverride {
     std::string key;
     Formosa::Gramambular2::ReadingGrid::WalkResult walk;
+};
+
+// Personal memory (design D5): where a node of the composition came from.
+// 'p' manual pick, 'a' associated phrase, 'm' memory suggestion (with the
+// user override model key and candidate, for refresh on commit, D8).
+struct AFMNodeProvenance {
+    char source = 'w';
+    std::string uomKey;
+    std::string candidate;
+};
+
+// Keyed by node identity: stable across edits elsewhere in the buffer.
+typedef std::map<Formosa::Gramambular2::ReadingGrid::NodePtr, AFMNodeProvenance> AFMProvenanceMap;
+
+// How _latestWalk was produced (record field "walk").
+typedef NS_ENUM(NSInteger, AFMWalkSelection) {
+    AFMWalkSelectionStock = 0,
+    AFMWalkSelectionNeural,
+    AFMWalkSelectionPrecise,
+};
+
+// A composition captured by -clear, consumed by -recordCommittedText:
+// (design D4).
+struct AFMCommitSnapshot {
+    Formosa::Gramambular2::ReadingGrid::WalkResult walk;
+    AFMProvenanceMap provenance;
+    bool manual = false;
+    bool bopomofoMode = false;
+    AFMWalkSelection walkSelection = AFMWalkSelectionStock;
+    NSString *composingText = nil;
 };
 
 static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::WalkResult& walk)
@@ -88,7 +120,6 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     NSString *_inputMode;
 
     // Precise mode (design D1 / D3).
-    BOOL _latestWalkUsedNeural;
     std::optional<AFMPreciseOverride> _preciseOverride;
     // Key (+ controller epoch) of the most recent request made or result
     // applied; an identical request is not made again.
@@ -99,6 +130,14 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     AFMPreciseRequest *_pendingPreciseRequest;
     std::string _pendingPreciseKey;
     std::vector<Formosa::Gramambular2::ReadingGrid::WalkResult> _pendingPrecisePaths;
+
+    // Personal memory (design D4 / D5).
+    AFMWalkSelection _latestWalkSelection;
+    AFMProvenanceMap _provenance;
+    BOOL _manualPickInComposition;
+    // The composing buffer of the last Inputting state built here.
+    NSString *_lastComposingText;
+    std::optional<AFMCommitSnapshot> _pendingCommitSnapshot;
 }
 
 @synthesize delegate = _delegate;
@@ -244,8 +283,16 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
         return;
     }
     Formosa::Gramambular2::ReadingGrid::NodePtr currentNode = *nodeIter;
-    if (currentNode != nullptr && currentNode->currentUnigram().score() > -8) {
-        _userOverrideModel->observe(prevWalk, _latestWalk, self.actualCandidateCursorIndex, [NSDate date].timeIntervalSince1970);
+    if (currentNode != nullptr) {
+        _manualPickInComposition = YES;
+        _provenance[currentNode] = AFMNodeProvenance { 'p', std::string(), std::string() };
+        if (currentNode->currentUnigram().score() > -8 && [self _shouldObservePick]) {
+            AFMLearningStore *store = AFMLearningStore.sharedStore;
+            _userOverrideModel->observe(prevWalk, _latestWalk, self.actualCandidateCursorIndex, [store now]);
+            if (_userOverrideModel->policy().latestPickWins) {
+                [store markDirty];
+            }
+        }
     }
 
     if (currentNode != nullptr && flag && Preferences.moveCursorAfterSelectingCandidate) {
@@ -344,15 +391,140 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     }
 
     [self _walk];
+    _manualPickInComposition = YES;
+    auto phraseIter = _latestWalk.findNodeAt(actualPrefixCursorIndex);
+    if (phraseIter != _latestWalk.nodes.cend() && *phraseIter != nullptr) {
+        _provenance[*phraseIter] = AFMNodeProvenance { 'a', std::string(), std::string() };
+    }
     // Cursor is already at accumulatedCursor, so no more work here.
 }
 
 - (void)clear
 {
+    // The single commit choke point (design D4): keep the composition until
+    // the controller reports the committed text. A clear with nothing
+    // composed keeps an unconsumed snapshot.
+    if (!_latestWalk.nodes.empty()) {
+        AFMCommitSnapshot snapshot;
+        snapshot.walk = std::move(_latestWalk);
+        snapshot.provenance = std::move(_provenance);
+        snapshot.manual = _manualPickInComposition;
+        snapshot.bopomofoMode = _inputMode == InputModeBopomofo;
+        snapshot.walkSelection = _latestWalkSelection;
+        snapshot.composingText = _lastComposingText;
+        _pendingCommitSnapshot = std::move(snapshot);
+    }
+    _provenance.clear();
+    _manualPickInComposition = NO;
+    _lastComposingText = nil;
     _bpmfReadingBuffer->clear();
     _grid->clear();
     _latestWalk = Formosa::Gramambular2::ReadingGrid::WalkResult {};
     [self _invalidatePrecise];
+}
+
+#pragma mark - Personal memory
+
+/// Whether a manual pick goes into the user override model: always with the
+/// stock model; with the long-term model not in Plain Bopomofo mode (D9) and
+/// not under secure input (D6).
+- (BOOL)_shouldObservePick
+{
+    if (!_userOverrideModel->policy().latestPickWins) {
+        return YES;
+    }
+    if (_inputMode == InputModePlainBopomofo) {
+        return NO;
+    }
+    return ![AFMLearningStore.sharedStore isSecureInputEnabled];
+}
+
+/// Design D7: whether the node a suggestion would override, or any walk node
+/// overlapping it, comes from the user's phrase file.
+- (BOOL)_overrideTargetHasUserPhrase:(const std::optional<Formosa::Gramambular2::ReadingGrid::NodeInSpan>&)target
+{
+    if (!target.has_value() || target->node == nullptr) {
+        return NO;
+    }
+    size_t begin = target->spanIndex;
+    size_t end = begin + target->node->spanningLength();
+    size_t position = 0;
+    for (const auto& node : _latestWalk.nodes) {
+        size_t nodeEnd = position + node->spanningLength();
+        if (position < end && begin < nodeEnd && node->currentUnigram().isUserPhrase()) {
+            return YES;
+        }
+        position = nodeEnd;
+    }
+    return NO;
+}
+
+- (void)recordCommittedText:(NSString *)text
+{
+    if (!_pendingCommitSnapshot.has_value()) {
+        return;
+    }
+    AFMCommitSnapshot snapshot = std::move(*_pendingCommitSnapshot);
+    _pendingCommitSnapshot.reset();
+
+    AFMLearningStore *store = AFMLearningStore.sharedStore;
+    if (!store.recordingEnabled || !snapshot.bopomofoMode || snapshot.composingText == nil || ![text isEqualToString:snapshot.composingText] || [store isSecureInputEnabled]) {
+        return;
+    }
+    double now = [store now];
+
+    // Refresh remembered suggestions committed unchanged (design D8).
+    BOOL refreshed = NO;
+    AFMSentenceRecord record;
+    record.timestamp = now;
+    record.manual = snapshot.manual;
+    switch (snapshot.walkSelection) {
+    case AFMWalkSelectionNeural:
+        record.walk = "r";
+        break;
+    case AFMWalkSelectionPrecise:
+        record.walk = "precise";
+        break;
+    default:
+        record.walk = "stock";
+        break;
+    }
+    if (snapshot.walkSelection != AFMWalkSelectionStock) {
+        NSString *identifier = AFMNeuralSelector.sharedSelector.modelIdentifier;
+        record.modelIdentifier = identifier != nil ? std::string(identifier.UTF8String) : std::string();
+    }
+    bool hasSyllable = false;
+    record.nodes.reserve(snapshot.walk.nodes.size());
+    for (const auto& node : snapshot.walk.nodes) {
+        const auto& unigram = node->currentUnigram();
+        AFMSentenceRecordNode recordNode;
+        recordNode.reading = node->reading();
+        recordNode.raw = unigram.rawValue().empty() ? unigram.value() : unigram.rawValue();
+        auto it = snapshot.provenance.find(node);
+        if (it != snapshot.provenance.end()) {
+            recordNode.source = it->second.source;
+            if (it->second.source == 'm' && node->value() == it->second.candidate && _userOverrideModel->refresh(it->second.uomKey, it->second.candidate, now)) {
+                refreshed = YES;
+            }
+        } else if (unigram.isUserPhrase()) {
+            recordNode.source = 'u';
+        } else if (snapshot.walkSelection == AFMWalkSelectionPrecise) {
+            recordNode.source = 'q';
+        }
+        const std::string& reading = recordNode.reading;
+        if (!reading.empty() && reading[0] != '_' && reading != " ") {
+            hasSyllable = true;
+        }
+        record.nodes.push_back(std::move(recordNode));
+    }
+    if (refreshed) {
+        [store markDirty];
+    }
+    // Drop rule (review F20): no Bopomofo syllable, no record.
+    if (!hasSyllable) {
+        return;
+    }
+    [store appendSentenceRecord:std::move(record)];
 }
 
 - (void)handleForceCommitWithStateCallback:(void (^)(InputState *))stateCallback
@@ -594,11 +766,19 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
 
         // get user override model suggestion
         if (_inputMode != InputModePlainBopomofo) {
-            McBopomofo::UserOverrideModel::Suggestion suggestion = _userOverrideModel->suggest(_latestWalk, self.actualCandidateCursorIndex, [NSDate date].timeIntervalSince1970);
+            size_t cursor = self.actualCandidateCursorIndex;
+            McBopomofo::UserOverrideModel::SuggestionWithKey suggested = _userOverrideModel->suggestWithKey(_latestWalk, cursor, [AFMLearningStore.sharedStore now]);
+            const McBopomofo::UserOverrideModel::Suggestion& suggestion = suggested.suggestion;
             if (!suggestion.empty()) {
-                Formosa::Gramambular2::ReadingGrid::Node::OverrideType type = suggestion.forceHighScoreOverride ? Formosa::Gramambular2::ReadingGrid::Node::OverrideType::kOverrideValueWithHighScore : Formosa::Gramambular2::ReadingGrid::Node::OverrideType::kOverrideValueWithScoreFromTopUnigram;
-                _grid->overrideCandidate(self.actualCandidateCursorIndex, suggestion.candidate, type);
-                [self _walk];
+                // User phrases take precedence over remembered picks (D7).
+                auto target = _grid->findOverrideTarget(cursor, suggestion.candidate);
+                if (![self _overrideTargetHasUserPhrase:target]) {
+                    Formosa::Gramambular2::ReadingGrid::Node::OverrideType type = suggestion.forceHighScoreOverride ? Formosa::Gramambular2::ReadingGrid::Node::OverrideType::kOverrideValueWithHighScore : Formosa::Gramambular2::ReadingGrid::Node::OverrideType::kOverrideValueWithScoreFromTopUnigram;
+                    if (_grid->overrideCandidate(cursor, suggestion.candidate, type) && target.has_value()) {
+                        _provenance[target->node] = AFMNodeProvenance { 'm', suggested.key, suggestion.candidate };
+                    }
+                    [self _walk];
+                }
             }
         }
 
@@ -658,11 +838,12 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
             if (input.isShiftHold || !Preferences.chooseCandidateUsingSpace) {
                 if (_grid->cursor() >= _grid->length()) {
                     NSString *composingBuffer = ((InputStateNotEmpty *)state).composingBuffer;
+                    // Clear first, so the commit below is recorded (design D4).
+                    [self clear];
                     if (composingBuffer.length) {
                         InputStateCommitting *committing = [[InputStateCommitting alloc] initWithPoppedText:composingBuffer];
                         stateCallback(committing);
                     }
-                    [self clear];
                     InputStateCommitting *committing = [[InputStateCommitting alloc] initWithPoppedText:@" "];
                     stateCallback(committing);
                     InputStateEmpty *empty = [[InputStateEmpty alloc] init];
@@ -2458,6 +2639,12 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
 
 - (InputStateInputting *)buildInputtingState
 {
+    // A composition is active: any snapshot left from an earlier one (Esc,
+    // reading output, ...) is stale (design D4).
+    if (!_latestWalk.nodes.empty()) {
+        _pendingCommitSnapshot.reset();
+    }
+
     // To construct an Inputting state, we need to first retrieve the entire
     // composing buffer from the current grid, then split the composed string
     // into head and tail, so that we can insert the current reading (if
@@ -2585,12 +2772,13 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     NSInteger cursorIndex = head.length + reading.length;
     InputStateInputting *newState = [[InputStateInputting alloc] initWithComposingBuffer:composedText cursorIndex:cursorIndex];
     newState.tooltip = tooltip;
+    _lastComposingText = composedText;
     return newState;
 }
 
 - (void)_walk
 {
-    _latestWalkUsedNeural = NO;
+    _latestWalkSelection = AFMWalkSelectionStock;
     if (_inputMode != InputModeBopomofo) {
         _preciseOverride.reset();
         _latestWalk = _grid->walk();
@@ -2601,7 +2789,7 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     if (_preciseOverride.has_value()) {
         if (_preciseOverride->key == [self _preciseRequestKey]) {
             _latestWalk = _preciseOverride->walk;
-            _latestWalkUsedNeural = YES;
+            _latestWalkSelection = AFMWalkSelectionPrecise;
             return;
         }
         _preciseOverride.reset();
@@ -2614,7 +2802,7 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     _latestWalk = [AFMNeuralSelector.sharedSelector walkGrid:*_grid
                                        deferBreakerRecording:AFMPreciseController.sharedController.isReady
                                                   usedNeural:&usedNeural];
-    _latestWalkUsedNeural = usedNeural;
+    _latestWalkSelection = usedNeural ? AFMWalkSelectionNeural : AFMWalkSelectionStock;
 }
 
 #pragma mark - Precise mode
@@ -2627,6 +2815,15 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
 - (void)rewalkForTesting
 {
     [self _walk];
+}
+
+- (nullable NSString *)userOverrideSuggestionForTesting
+{
+    if (_latestWalk.nodes.empty()) {
+        return nil;
+    }
+    auto suggestion = _userOverrideModel->suggest(_latestWalk, self.actualCandidateCursorIndex, [AFMLearningStore.sharedStore now]);
+    return suggestion.empty() ? nil : @(suggestion.candidate.c_str());
 }
 
 /// Discards any applied precise result and outstanding request.
@@ -2684,7 +2881,7 @@ static std::string AFMJoinedValues(const Formosa::Gramambular2::ReadingGrid::Wal
     [controller noteKeyEvent];
     // Precise mode not ready (or not applicable): no enumeration, no gate; a
     // measurement deferred by this key event's walk is recorded as is.
-    if (composingBuffer == nil || _inputMode != InputModeBopomofo || !controller.isReady || !_latestWalkUsedNeural || _preciseOverride.has_value() || _grid->length() == 0) {
+    if (composingBuffer == nil || _inputMode != InputModeBopomofo || !controller.isReady || _latestWalkSelection == AFMWalkSelectionStock || _preciseOverride.has_value() || _grid->length() == 0) {
         [selector flushPendingBreakerRecordingAddingMilliseconds:0];
         return;
     }
