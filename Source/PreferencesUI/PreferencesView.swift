@@ -768,6 +768,8 @@ struct SelectionModelPreferencesView: View {
                 }
             }
 
+            PersonalizationSection()
+
             PreferenceRow {
                 Text(localize("These settings take effect the next time you switch to this input method; precise mode starts loading right away."))
                     .font(.caption)
@@ -803,6 +805,71 @@ struct SelectionModelPreferencesView: View {
                 }
             }
         }
+    }
+}
+
+/// 「個人化模型」 (personal-finetune D14): status, eligible segments, last run,
+/// progress with 「取消」, and the three buttons. Polls status.json every second
+/// only while visible.
+struct PersonalizationSection: View {
+    @EnvironmentObject private var preferences: PreferencesViewModel
+    @Environment(\.preferencesLocalizer) private var localize
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(width: 300, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    var body: some View {
+        let lines = preferences.personalizationLines(localize: localize)
+        PreferenceRow(localize("Personalized Model:")) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(lines.status)
+                    .frame(width: 300, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let pending = lines.pending {
+                    caption(pending)
+                }
+                caption(lines.eligible)
+                if let progress = lines.progress {
+                    caption(progress)
+                }
+                if let lastRun = lines.lastRun {
+                    caption(lastRun)
+                }
+                if let message = lines.message {
+                    caption(message)
+                }
+                if let paused = lines.paused {
+                    caption(paused)
+                }
+                HStack(spacing: 8) {
+                    if preferences.personalRunning {
+                        Button(localize("Cancel")) {
+                            preferences.cancelLearning()
+                        }
+                    } else {
+                        Button(localize("Learn Now")) {
+                            preferences.learnNow()
+                        }
+                        .disabled(!preferences.learnNowEnabled)
+                    }
+                    Button(localize("Use Factory Model")) {
+                        preferences.useFactoryModel()
+                    }
+                    .disabled(!preferences.useFactoryModelEnabled)
+                    Button(localize("Use Previous Version")) {
+                        preferences.usePreviousVersion()
+                    }
+                    .disabled(!preferences.usePreviousVersionEnabled)
+                }
+            }
+        }
+        .onAppear { preferences.startPersonalizationPolling() }
+        .onDisappear { preferences.stopPersonalizationPolling() }
     }
 }
 

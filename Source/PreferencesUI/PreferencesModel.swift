@@ -88,6 +88,17 @@ enum SelectionModelStatus: Equatable {
     }
 }
 
+/// Lines of the 「個人化模型」 section (personal-finetune D14).
+struct PersonalizationLines: Equatable {
+    var status = ""
+    var pending: String?
+    var eligible = ""
+    var progress: String?
+    var lastRun: String?
+    var message: String?
+    var paused: String?
+}
+
 @MainActor
 final class PreferencesViewModel: NSObject, ObservableObject {
     private var defaultsObserver: NSObjectProtocol?
@@ -388,6 +399,239 @@ final class PreferencesViewModel: NSObject, ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    // MARK: Personalized model section (personal-finetune D14)
+
+    /// The controller behind the 「個人化模型」 section (tests inject one).
+    var personalTraining: AFMPersonalTrainingController = .shared {
+        didSet { observePersonalTraining() }
+    }
+    /// The selector whose loaded version is shown (tests inject one).
+    var personalSelector: () -> AFMNeuralSelector = { AFMNeuralSelector.shared }
+    /// status.json of the running helper, refreshed every second while the
+    /// section is visible.
+    @Published private(set) var personalRunStatus: [AnyHashable: Any]?
+    /// Message after 「立即學習」 was refused (e.g. too little data).
+    @Published private(set) var personalStartMessage: PersonalStartMessage?
+    private var personalPollTimer: Timer?
+    private var personalObserver: NSObjectProtocol?
+    /// Polling interval while the tab is visible.
+    var personalPollInterval: TimeInterval = 1
+
+    enum PersonalStartMessage: Equatable {
+        case notEnoughData(available: Int, needed: Int)
+        case packMissing
+        case helperMissing
+        case failedToStart
+    }
+
+    var isPollingPersonalization: Bool { personalPollTimer != nil }
+
+    /// Starts the 1 s status polling (tab visible). Never blocks: status.json
+    /// is read off main and the pool scan runs on the store queue.
+    func startPersonalizationPolling() {
+        guard personalPollTimer == nil else { return }
+        pollPersonalization()
+        let timer = Timer(timeInterval: personalPollInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollPersonalization() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        personalPollTimer = timer
+    }
+
+    /// Stops polling (tab hidden / window closed).
+    func stopPersonalizationPolling() {
+        personalPollTimer?.invalidate()
+        personalPollTimer = nil
+    }
+
+    func pollPersonalization() {
+        let controller = personalTraining
+        controller.refreshEligibleCount(completion: nil)
+        if controller.isRunning {
+            controller.readStatus { [weak self] status in
+                MainActor.assumeIsolated {
+                    guard let self, self.personalTraining === controller else { return }
+                    self.personalRunStatus = controller.isRunning ? status : nil
+                }
+            }
+        } else if personalRunStatus != nil {
+            personalRunStatus = nil
+        }
+    }
+
+    private func observePersonalTraining() {
+        if let personalObserver {
+            NotificationCenter.default.removeObserver(personalObserver)
+        }
+        personalObserver = NotificationCenter.default.addObserver(
+            forName: .AFMPersonalTrainingControllerDidChange, object: personalTraining, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.objectWillChange.send()
+            }
+        }
+    }
+
+    var personalRunning: Bool { personalTraining.isRunning }
+    /// 「立即學習」: disabled while learning is off (replaced by 「取消」 while running).
+    var learnNowEnabled: Bool { learningEnabled && !personalTraining.isRunning }
+    /// 「改回出廠模型」: while a personalized version is selected for use.
+    var useFactoryModelEnabled: Bool { personalTraining.activeVersion != nil }
+    /// 「改用上一版」: only when a previous version exists.
+    var usePreviousVersionEnabled: Bool { personalTraining.previousVersion != nil }
+    var personalPaused: Bool { personalTraining.paused || personalTraining.failurePaused }
+
+    @discardableResult
+    func learnNow() -> AFMPersonalStartResult {
+        objectWillChange.send()
+        let controller = personalTraining
+        let result = controller.startManualRun()
+        switch result {
+        case .started, .alreadyRunning: personalStartMessage = nil
+        case .notEnoughData:
+            personalStartMessage = .notEnoughData(
+                available: max(controller.eligibleCount, 0), needed: controller.minimumEligible)
+        case .packMissing: personalStartMessage = .packMissing
+        case .helperMissing: personalStartMessage = .helperMissing
+        default: personalStartMessage = .failedToStart
+        }
+        pollPersonalization()
+        return result
+    }
+
+    func cancelLearning() {
+        objectWillChange.send()
+        personalTraining.cancelRun()
+    }
+
+    func useFactoryModel() {
+        objectWillChange.send()
+        personalTraining.revertToFactory()
+    }
+
+    func usePreviousVersion() {
+        objectWillChange.send()
+        personalTraining.usePreviousVersion()
+    }
+
+    /// The text lines of the section (localized with `localize`).
+    func personalizationLines(localize: (String) -> String) -> PersonalizationLines {
+        let controller = personalTraining
+        let selector = personalSelector()
+        var lines = PersonalizationLines()
+        func number(_ n: Int) -> String {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            return formatter.string(from: NSNumber(value: n)) ?? String(n)
+        }
+        func date(_ t: Double) -> String {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.string(from: Date(timeIntervalSince1970: t))
+        }
+        func points(_ v: Double) -> String {
+            let sign = v > 0 ? "+" : (v < 0 ? "−" : "±")
+            return String(format: localize("%@ pt"), sign + String(format: "%.1f", abs(v)))
+        }
+        if !controller.packAvailable {
+            lines.status = localize("Personalization data pack missing")
+        } else {
+            switch selector.personalStatus {
+            case .active:
+                let version = selector.loadedPersonalVersion
+                lines.status = String(
+                    format: localize("In use: personalized model version %ld (%@)"), version,
+                    date(controller.createdTime(ofVersion: version)))
+            case .unusable:
+                lines.status = localize("Personalized model could not be loaded; using the factory model")
+            case .mismatch:
+                lines.status = localize(
+                    "Personalized model does not match the current settings; using the factory model")
+            case .loading:
+                lines.status = localize("Loading personalized model…")
+            default:
+                lines.status = localize("In use: factory model")
+            }
+            // A change that applies at the next activation.
+            let selected = controller.activeVersion?.intValue ?? 0
+            let loaded = selector.personalStatus == .active ? selector.loadedPersonalVersion : 0
+            let attempted = selector.personalStatus == .unusable || selector.personalStatus == .mismatch
+            if selected != loaded && !(attempted && selected != 0) && selector.personalStatus != .loading {
+                lines.pending =
+                    selected == 0
+                    ? localize("The factory model will be used from the next activation")
+                    : String(format: localize("Version %ld will be used from the next activation"), selected)
+            }
+        }
+        let eligible = max(controller.eligibleCount, 0)
+        lines.eligible = String(
+            format: localize("Eligible segments: %@ (at least %@ needed to learn)"), number(eligible),
+            number(controller.minimumEligible))
+        if controller.isRunning {
+            let phase = (personalRunStatus?["phase"] as? String) ?? "scan"
+            let phaseTitle = localize(Self.phaseTitleKey(phase))
+            let step = (personalRunStatus?["step"] as? NSNumber)?.intValue ?? 0
+            let steps = (personalRunStatus?["steps"] as? NSNumber)?.intValue ?? 0
+            if steps > 0 {
+                lines.progress = String(
+                    format: localize("Learning: %@ %ld%%"), phaseTitle, Int((Double(step) / Double(steps) * 100).rounded()))
+            } else {
+                lines.progress = String(format: localize("Learning: %@"), phaseTitle)
+            }
+        }
+        if let last = controller.lastRun, let result = last["result"] as? String {
+            let time = (last["time"] as? NSNumber)?.doubleValue ?? 0
+            var outcome = localize(Self.resultTitleKey(result))
+            if let dp = (last["delta_personal_pt"] as? NSNumber)?.doubleValue,
+                let dg = (last["delta_general_pt"] as? NSNumber)?.doubleValue
+            {
+                outcome += String(format: localize("(personal test %@, general test %@)"), points(dp), points(dg))
+            }
+            lines.lastRun = String(format: localize("Last run: %@ — %@"), date(time), outcome)
+        }
+        switch personalStartMessage {
+        case .notEnoughData(let available, let needed):
+            lines.message = String(
+                format: localize("Not enough data: %@ segments needed, %@ available"), number(needed), number(available))
+        case .packMissing: lines.message = localize("Personalization data pack missing")
+        case .helperMissing, .failedToStart: lines.message = localize("Learning could not be started")
+        case nil: break
+        }
+        if personalPaused {
+            lines.paused = localize("Automatic learning is paused")
+        }
+        return lines
+    }
+
+    static func phaseTitleKey(_ phase: String) -> String {
+        switch phase {
+        case "scan": "Reading sentences"
+        case "nbest": "Preparing candidates"
+        case "train": "Training"
+        case "merge": "Merging weights"
+        case "gate": "Evaluating"
+        case "calib": "Calibrating"
+        default: "Finishing"
+        }
+    }
+
+    static func resultTitleKey(_ result: String) -> String {
+        switch result {
+        case "adopted": "Adopted"
+        case "not_significant": "Not adopted: improvement not statistically significant"
+        case "too_small_gain": "Not adopted: improvement too small"
+        case "general_regression": "Not adopted: general accuracy dropped too much"
+        case "worse_than_active": "Not adopted: not better than the version in use"
+        case "cancelled": "Cancelled"
+        case "deferred": "Deferred (not on AC power)"
+        case "not_enough_data": "Not enough data"
+        case "discarded:retracted": "Discarded (a sentence used for learning was deleted)"
+        case "discarded:generation": "Cancelled"
+        default: "Failed"
+        }
+    }
+
     var neuralStatus: SelectionModelStatus {
         .neural(enabled: neuralWalkEnabled, state: neuralSelectorState)
     }
@@ -445,6 +689,7 @@ final class PreferencesViewModel: NSObject, ObservableObject {
         Preferences.populateDefaults()
         loadBasisKeyboardLayoutOptions()
         observeModelStates()
+        observePersonalTraining()
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: Preferences.defaults,
@@ -463,6 +708,10 @@ final class PreferencesViewModel: NSObject, ObservableObject {
         for observer in modelStateObservers {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let personalObserver {
+            NotificationCenter.default.removeObserver(personalObserver)
+        }
+        personalPollTimer?.invalidate()
     }
 
     func chooseUserPhraseFolder() {

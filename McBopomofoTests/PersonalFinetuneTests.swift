@@ -21,6 +21,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 // OTHER DEALINGS IN THE SOFTWARE.
 
+import SwiftUI
 import XCTest
 
 @testable import McBopomofo
@@ -1346,3 +1347,254 @@ class PersonalClearTests: PersonalTrainingTestCase {
     }
 }
 
+// MARK: - Task 6.1: 「個人化模型」 preferences section (design D14)
+
+/// Records the buttons' calls and reports injected state.
+final class SpyPersonalTrainingController: AFMPersonalTrainingController {
+    var calls: [String] = []
+    var spyRunning = false
+    var spyActive: NSNumber?
+    var spyPrevious: NSNumber?
+    var spyStatus: [AnyHashable: Any]?
+    var refreshCount = 0
+
+    override var isRunning: Bool { spyRunning }
+    override var activeVersion: NSNumber? { spyActive }
+    override var previousVersion: NSNumber? { spyPrevious }
+    override func startManualRun() -> AFMPersonalStartResult {
+        calls.append("start")
+        return .started
+    }
+    override func cancelRun() { calls.append("cancel") }
+    override func revertToFactory() { calls.append("revert") }
+    override func usePreviousVersion() { calls.append("previous") }
+    override func refreshEligibleCount(completion: (() -> Void)?) {
+        refreshCount += 1
+        completion?()
+    }
+    override func readStatus(completion: @escaping ([AnyHashable: Any]?) -> Void) {
+        completion(spyStatus)
+    }
+}
+
+@MainActor
+class PersonalizationPreferencesTests: PersonalTrainingTestCase {
+
+    func localizer(_ localization: String) throws -> (String) -> String {
+        guard let path = Bundle.main.path(forResource: localization, ofType: "lproj"),
+            let bundle = Bundle(path: path)
+        else {
+            throw XCTSkip("no \(localization).lproj in the app bundle")
+        }
+        return { bundle.localizedString(forKey: $0, value: nil, table: nil) }
+    }
+
+    func makeSpy() -> SpyPersonalTrainingController {
+        let spy = SpyPersonalTrainingController(
+            memoryDirectory: memoryDirectory, modelDirectory: modelDirectory, helperPath: nil)
+        retainedFakes.append(spy)
+        return spy
+    }
+
+    func testEnablementRules() {
+        let model = PreferencesViewModel()
+        let spy = makeSpy()
+        model.personalTraining = spy
+        // Fresh: factory model in use, 「改回出廠模型」 and 「改用上一版」 disabled.
+        Preferences.setLearningEnabled(true)
+        XCTAssertTrue(model.learnNowEnabled)
+        XCTAssertFalse(model.useFactoryModelEnabled)
+        XCTAssertFalse(model.usePreviousVersionEnabled)
+        XCTAssertFalse(model.personalRunning)
+        // Learning off -> 「立即學習」 disabled.
+        model.learningEnabled = false
+        XCTAssertFalse(model.learnNowEnabled)
+        model.learningEnabled = true
+        // Running -> 「取消」 replaces 「立即學習」.
+        spy.spyRunning = true
+        XCTAssertTrue(model.personalRunning)
+        XCTAssertFalse(model.learnNowEnabled)
+        spy.spyRunning = false
+        // A personalized version in use -> 「改回出廠模型」 enabled.
+        spy.spyActive = 2
+        XCTAssertTrue(model.useFactoryModelEnabled)
+        XCTAssertFalse(model.usePreviousVersionEnabled)
+        // A previous version exists -> 「改用上一版」 enabled.
+        spy.spyPrevious = 1
+        XCTAssertTrue(model.usePreviousVersionEnabled)
+        spy.spyActive = nil
+        XCTAssertFalse(model.useFactoryModelEnabled)
+        XCTAssertTrue(model.usePreviousVersionEnabled)
+    }
+
+    func testButtonsCallTheController() {
+        let model = PreferencesViewModel()
+        let spy = makeSpy()
+        model.personalTraining = spy
+        XCTAssertEqual(model.learnNow(), .started)
+        model.cancelLearning()
+        model.useFactoryModel()
+        model.usePreviousVersion()
+        XCTAssertEqual(spy.calls, ["start", "cancel", "revert", "previous"])
+    }
+
+    func testPollingOnlyWhileVisible() throws {
+        let model = PreferencesViewModel()
+        let spy = makeSpy()
+        spy.spyRunning = true
+        spy.spyStatus = ["phase": "train", "step": 3, "steps": 10]
+        model.personalTraining = spy
+        model.personalPollInterval = 0.1
+        // Shown in a window -> polling; removed -> stopped.
+        let root = PersonalizationSection().environmentObject(model)
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 300), styleMask: [.borderless], backing: .buffered,
+            defer: false)
+        window.contentView = hosting
+        window.orderFront(nil)
+        spin(0.35)
+        XCTAssertTrue(model.isPollingPersonalization)
+        XCTAssertGreaterThanOrEqual(spy.refreshCount, 2)
+        XCTAssertEqual(model.personalRunStatus?["phase"] as? String, "train")
+        let lines = model.personalizationLines(localize: try localizer("zh-Hant"))
+        XCTAssertEqual(lines.progress, "學習中：訓練 30%")
+        window.contentView = nil
+        window.orderOut(nil)
+        spin(0.2)
+        XCTAssertFalse(model.isPollingPersonalization)
+        let count = spy.refreshCount
+        spin(0.35)
+        XCTAssertEqual(spy.refreshCount, count, "no polling while hidden")
+        // Explicit start / stop.
+        model.startPersonalizationPolling()
+        XCTAssertTrue(model.isPollingPersonalization)
+        model.stopPersonalizationPolling()
+        XCTAssertFalse(model.isPollingPersonalization)
+    }
+
+    func testLinesWithTheRealController() throws {
+        let zh = try localizer("zh-Hant")
+        let en = try localizer("en")
+        writePool(600)
+        refresh()
+        let model = PreferencesViewModel()
+        model.personalTraining = controller
+        var lines = model.personalizationLines(localize: zh)
+        XCTAssertEqual(lines.status, "使用中：出廠模型")
+        XCTAssertEqual(lines.eligible, "可用句段：600（至少 1,000 才會學習）")
+        XCTAssertNil(lines.lastRun)
+        // Too little data: the tab says how many are needed and available.
+        XCTAssertEqual(model.learnNow(), .notEnoughData)
+        lines = model.personalizationLines(localize: zh)
+        XCTAssertEqual(lines.message, "資料不足：需要 1,000 個句段，目前 600 個")
+        XCTAssertEqual(
+            model.personalizationLines(localize: en).message, "Not enough data: 1,000 segments needed, 600 available")
+        // Adopted run.
+        writePool(500, startTime: now)
+        refresh()
+        XCTAssertEqual(model.learnNow(), .started)
+        XCTAssertEqual(waitForRun(), "adopted")
+        lines = model.personalizationLines(localize: zh)
+        XCTAssertNil(lines.message)
+        let day = { () -> String in
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "yyyy-MM-dd"
+            return f.string(from: Date(timeIntervalSince1970: self.now))
+        }()
+        XCTAssertEqual(lines.lastRun, "上次學習：\(day) — 已採用（個人測試 +5.0 分、一般測試 −0.4 分）")
+        XCTAssertEqual(lines.pending, "下次切換到本輸入法時改用第 1 版")
+        XCTAssertTrue(model.useFactoryModelEnabled)
+        // Rejected run.
+        try setBehavior("regress")
+        XCTAssertEqual(model.learnNow(), .started)
+        XCTAssertEqual(waitForRun(), "general_regression")
+        XCTAssertEqual(
+            model.personalizationLines(localize: zh).lastRun,
+            "上次學習：\(day) — 未採用：一般準確率下降過多（個人測試 +5.0 分、一般測試 −0.4 分）")
+        // Revert: paused note.
+        model.useFactoryModel()
+        lines = model.personalizationLines(localize: zh)
+        XCTAssertEqual(lines.paused, "自動學習已暫停")
+        XCTAssertFalse(model.useFactoryModelEnabled)
+        XCTAssertTrue(model.usePreviousVersionEnabled)
+        // Missing pack.
+        try FileManager.default.removeItem(atPath: modelDirectory + "/personalize/pack.json")
+        refresh()
+        XCTAssertEqual(model.personalizationLines(localize: zh).status, "缺少個人化資料包")
+    }
+
+    func testSelectorStatusLines() throws {
+        let zh = try localizer("zh-Hant")
+        writePool(1100)
+        refresh()
+        XCTAssertEqual(try startAndWait(), "adopted")
+        let scorer = FakeNeuralScorer()
+        retainedFakes.append(scorer)
+        var fails = false
+        let selector = AFMNeuralSelector(
+            scoreBlockForTesting: scorer.block,
+            personalBlockProvider: { _, error in
+                if fails {
+                    error.pointee = "bad"
+                    return nil
+                }
+                return scorer.block
+            }, loadDelay: 0)
+        let sha = factorySHA
+        selector.currentEvalConfigProvider = { alpha, yan in AFMCurrentEvalConfig(sha, "test-pack-1", alpha, yan) }
+        AFMNeuralSelector.shared = selector
+        selector.syncWithPreferences()
+        waitUntil { selector.state == .ready }
+        let model = PreferencesViewModel()
+        model.personalTraining = controller
+        model.personalSelector = { selector }
+        let day = { () -> String in
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "yyyy-MM-dd"
+            return f.string(from: Date(timeIntervalSince1970: self.now))
+        }()
+        XCTAssertEqual(model.personalizationLines(localize: zh).status, "使用中：個人化模型 第 1 版（\(day)）")
+        XCTAssertNil(model.personalizationLines(localize: zh).pending)
+        _ = fails
+        controller.revertToFactory()
+        XCTAssertEqual(model.personalizationLines(localize: zh).pending, "下次切換到本輸入法時改用出廠模型")
+    }
+
+    func testRenderSectionZhHant() throws {
+        let zh = try localizer("zh-Hant")
+        writePool(1100)
+        refresh()
+        XCTAssertEqual(try startAndWait(), "adopted")
+        XCTAssertEqual(try startAndWait(), "adopted")
+        let model = PreferencesViewModel()
+        model.personalTraining = controller
+        let root = SelectionModelPreferencesView()
+            .environmentObject(model)
+            .environment(\.preferencesLocalizer, zh)
+            .frame(width: 560, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(Color(nsColor: .windowBackgroundColor))
+        let hosting = NSHostingView(rootView: root)
+        hosting.appearance = NSAppearance(named: .aqua)
+        hosting.frame = NSRect(origin: .zero, size: hosting.fittingSize)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        spin(0.3)
+        let rep = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(png.count, 1000)
+        let outputDirectory =
+            ProcessInfo.processInfo.environment["AFM_PREFS_SCREENSHOT_DIR"] ?? NSTemporaryDirectory()
+        let url = URL(fileURLWithPath: outputDirectory).appendingPathComponent("selection-model-personalized-zh-Hant.png")
+        try png.write(to: url)
+        print("personalized section render: \(url.path)")
+        XCTAssertTrue(model.isPollingPersonalization, "visible section polls")
+        window.contentView = nil
+    }
+}
