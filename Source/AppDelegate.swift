@@ -192,14 +192,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
         // used until it is ready (or forever, if it is missing or fails).
         AFMNeuralSelector.shared.syncWithPreferences()
 
-        if UserDefaults.standard.object(forKey: kCheckUpdateAutomatically) == nil {
-            UserDefaults.standard.set(true, forKey: kCheckUpdateAutomatically)
-            UserDefaults.standard.synchronize()
+        if Preferences.defaults.object(forKey: kCheckUpdateAutomatically) == nil {
+            Preferences.defaults.set(true, forKey: kCheckUpdateAutomatically)
+            Preferences.defaults.synchronize()
         }
 
-        if UserDefaults.standard.object(forKey: kBeepUponInputErrorKey) == nil {
-            UserDefaults.standard.set(true, forKey: kBeepUponInputErrorKey)
-            UserDefaults.standard.synchronize()
+        if Preferences.defaults.object(forKey: kBeepUponInputErrorKey) == nil {
+            Preferences.defaults.set(true, forKey: kBeepUponInputErrorKey)
+            Preferences.defaults.synchronize()
         }
 
         NotificationCenter.default.addObserver(
@@ -238,18 +238,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NonModalAlertWindowControlle
 
         // time for update?
         if !forced {
-            if UserDefaults.standard.bool(forKey: kCheckUpdateAutomatically) == false {
+            if Preferences.defaults.bool(forKey: kCheckUpdateAutomatically) == false {
                 return
             }
             let now = Date()
-            let date = UserDefaults.standard.object(forKey: kNextUpdateCheckDateKey) as? Date ?? now
+            let date = Preferences.defaults.object(forKey: kNextUpdateCheckDateKey) as? Date ?? now
             if now.compare(date) == .orderedAscending {
                 return
             }
         }
 
         let nextUpdateDate = Date(timeInterval: kNextCheckInterval, since: Date())
-        UserDefaults.standard.set(nextUpdateDate, forKey: kNextUpdateCheckDateKey)
+        Preferences.defaults.set(nextUpdateDate, forKey: kNextUpdateCheckDateKey)
 
         checkTask = VersionUpdateApi.check(forced: forced) { result in
             defer {

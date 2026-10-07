@@ -175,14 +175,13 @@ class NeuralSelectorTests: XCTestCase {
             .deletingLastPathComponent()  // AFM Input
     }
 
-    /// R model directory for real-model tests: $AFM_RWALK_MODEL_DIR, the
-    /// installed model directory, or the clean_v1 export next to the repo.
+    /// R model directory for real-model tests: $AFM_RWALK_MODEL_DIR or the
+    /// clean_v1 export next to the repo. Never the user's installed model.
     func realModelDirectory() throws -> String {
         var candidates: [String] = []
         if let env = ProcessInfo.processInfo.environment["AFM_RWALK_MODEL_DIR"], !env.isEmpty {
             candidates.append(env)
         }
-        candidates.append(UserPhraseLocationHelper.rWalkModelDirectory)
         candidates.append(afmInputRoot.appendingPathComponent("train/ranker/export/clean_v1").path)
         for dir in candidates
         where FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("onnx/model_quantized.onnx")) {

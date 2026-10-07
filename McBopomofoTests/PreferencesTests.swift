@@ -22,6 +22,7 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 
 import Testing
+import XCTest
 
 @testable import McBopomofo
 
@@ -30,21 +31,21 @@ final class PreferencesTests {
 
     func reset() {
         Preferences.allKeys.forEach {
-            UserDefaults.standard.removeObject(forKey: $0)
+            Preferences.defaults.removeObject(forKey: $0)
         }
     }
 
     func makeSnapshot() -> [String: Any] {
         var dict = [String: Any]()
         Preferences.allKeys.forEach {
-            dict[$0] = UserDefaults.standard.object(forKey: $0)
+            dict[$0] = Preferences.defaults.object(forKey: $0)
         }
         return dict
     }
 
     func restore(from snapshot: [String: Any]) {
         Preferences.allKeys.forEach {
-            UserDefaults.standard.set(snapshot[$0], forKey: $0)
+            Preferences.defaults.set(snapshot[$0], forKey: $0)
         }
     }
 
@@ -212,23 +213,21 @@ final class PreferencesTests {
     func testNeuralWalkOverrides() {
         Preferences.neuralWalkEnabled = false
         #expect(Preferences.neuralWalkEnabled == false)
-        #expect(UserDefaults.standard.bool(forKey: "AFMNeuralWalkEnabled") == false)
+        #expect(Preferences.defaults.bool(forKey: "AFMNeuralWalkEnabled") == false)
         Preferences.neuralWalkAlpha = 0.25
         #expect(Preferences.neuralWalkAlpha == 0.25)
         // Values written by `defaults write ... -float` / `-int` are NSNumbers.
-        UserDefaults.standard.set(NSNumber(value: Float(0.75)), forKey: "AFMNeuralWalkAlpha")
+        Preferences.defaults.set(NSNumber(value: Float(0.75)), forKey: "AFMNeuralWalkAlpha")
         #expect(Preferences.neuralWalkAlpha == 0.75)
-        UserDefaults.standard.set(NSNumber(value: 0), forKey: "AFMNeuralWalkAlpha")
+        Preferences.defaults.set(NSNumber(value: 0), forKey: "AFMNeuralWalkAlpha")
         #expect(Preferences.neuralWalkAlpha == 0)
     }
 
     @Test("Test application support root and model directory paths")
     func testApplicationSupportPaths() {
-        let appSupport = NSSearchPathForDirectoriesInDomains(
-            .applicationSupportDirectory, .userDomainMask, true
-        ).first!
-        let root = (appSupport as NSString).appendingPathComponent("Sloth-listwise-Bopomofo")
-        #expect(UserPhraseLocationHelper.applicationSupportRoot == root)
+        // Under XCTest the root is an isolated per-run temp folder.
+        let root = UserPhraseLocationHelper.applicationSupportRoot
+        #expect((root as NSString).lastPathComponent.hasPrefix("Sloth-listwise-Bopomofo"))
         #expect(UserPhraseLocationHelper.modelsDirectory == root + "/models")
         #expect(UserPhraseLocationHelper.rWalkModelDirectory == root + "/models/r-walk")
         #expect(UserPhraseLocationHelper.defaultUserPhraseLocation == root)
@@ -351,5 +350,31 @@ final class CandidateKeyValidationTests {
         } catch {
             Issue.record("Should be safe")
         }
+    }
+}
+
+/// Guards against tests touching the installed IME's real preferences domain
+/// or ~/Library/Application Support folder (the test host shares its bundle id).
+final class TestIsolationTests: XCTestCase {
+    func testPreferencesAndAppSupportAreIsolatedUnderXCTest() {
+        XCTAssertTrue(isRunningUnderXCTest)
+        XCTAssertFalse(Preferences.defaults === UserDefaults.standard)
+
+        let realDomain = Bundle.main.bundleIdentifier!
+        let probeKey = "TestIsolationProbe-\(UUID().uuidString)"
+        Preferences.defaults.set(true, forKey: probeKey)
+        defer { Preferences.defaults.removeObject(forKey: probeKey) }
+        XCTAssertNil(UserDefaults.standard.persistentDomain(forName: realDomain)?[probeKey])
+        XCTAssertNil(UserDefaults.standard.object(forKey: probeKey))
+
+        let realAppSupport = NSSearchPathForDirectoriesInDomains(
+            .applicationSupportDirectory, .userDomainMask, true
+        ).first!
+        let root = UserPhraseLocationHelper.applicationSupportRoot
+        XCTAssertFalse(root.hasPrefix(realAppSupport), root)
+        XCTAssertTrue(root.hasPrefix(NSTemporaryDirectory()), root)
+        XCTAssertTrue(UserPhraseLocationHelper.rWalkModelDirectory.hasPrefix(root))
+        XCTAssertTrue(LanguageModelManager.dataFolderPath.hasPrefix(root)
+            || Preferences.useCustomUserPhraseLocation)
     }
 }

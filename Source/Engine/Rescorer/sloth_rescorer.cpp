@@ -2,6 +2,8 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "ort_env.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -192,7 +194,7 @@ constexpr double kMissingCharLogp = -30.0;  // same as the Python reference.
 }  // namespace
 
 struct SlothRescorer::Impl {
-  Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "SlothRescorer"};
+  Ort::Env env = MakeOfflineOrtEnv("SlothRescorer");
   std::unique_ptr<Ort::Session> session;
   std::unordered_map<std::string, int64_t> sylId;   // syllable -> input id
   std::unordered_map<std::string, int64_t> charId;  // char -> output id

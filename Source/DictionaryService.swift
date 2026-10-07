@@ -79,6 +79,10 @@ private struct Speak: DictionaryService {
         guard let speechSynthesizer else {
             return false
         }
+        // Keep the test suite silent; the lookup path is still exercised.
+        if isRunningUnderXCTest {
+            return true
+        }
         speechSynthesizer.stopSpeaking()
         speechSynthesizer.startSpeaking(phrase)
         return true

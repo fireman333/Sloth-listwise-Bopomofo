@@ -89,13 +89,25 @@ private let kShowBopomofoFontAnnotationSupportItemInInputMenu =
 private let kBopomofoFontAnnotationSupportMenuItemEnabledByInstalledFontsCheck_V1 =
     "BopomofoFontAnnotationSupportMenuItemEnabledByInstalledFontsCheck_V1"
 
+// MARK: Test isolation
+
+/// True when this process hosts XCTest (McBopomofoTests uses the app as its
+/// TEST_HOST, which shares the installed IME's bundle id). Evaluated once.
+let isRunningUnderXCTest: Bool = {
+    let env = ProcessInfo.processInfo.environment
+    return env["XCTestConfigurationFilePath"] != nil
+        || env["XCTestSessionIdentifier"] != nil
+        || env["XCTestBundlePath"] != nil
+        || NSClassFromString("XCTestCase") != nil
+}()
+
 // MARK: Property wrappers
 
 @propertyWrapper
 struct UserDefault<Value> {
     let key: String
     let defaultValue: Value
-    var container: UserDefaults = .standard
+    var container: UserDefaults = Preferences.defaults
 
     var wrappedValue: Value {
         get {
@@ -111,7 +123,7 @@ struct UserDefault<Value> {
 struct UserDefaultWithFunction<Value> {
     let key: String
     let defaultValueFunction: () -> Value
-    var container: UserDefaults = .standard
+    var container: UserDefaults = Preferences.defaults
 
     var wrappedValue: Value {
         get {
@@ -127,7 +139,7 @@ struct UserDefaultWithFunction<Value> {
 struct EnumUserDefault<T: RawRepresentable> {
     let key: String
     let defaultValue: T
-    var container: UserDefaults = .standard
+    var container: UserDefaults = Preferences.defaults
 
     var wrappedValue: T {
         get {
@@ -217,6 +229,19 @@ struct CandidateListTextSize {
 // MARK: -
 
 class Preferences: NSObject {
+    /// Backing store for every preference. `.standard` in production; under
+    /// XCTest a separate, cleared suite so tests never touch the real IME's
+    /// defaults domain.
+    @objc static let defaults: UserDefaults = {
+        guard isRunningUnderXCTest else { return .standard }
+        let suiteName = (Bundle.main.bundleIdentifier ?? "McBopomofo") + ".tests"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            fatalError("Cannot create isolated test defaults suite \(suiteName)")
+        }
+        suite.removePersistentDomain(forName: suiteName)
+        return suite
+    }()
+
     static var allKeys: [String] {
         [
             kLetterBehaviorKey,
@@ -540,13 +565,23 @@ extension Preferences {
     /// McBopomofo so both input methods can be installed side by side.
     @objc static let applicationSupportFolderName = "Sloth-listwise-Bopomofo"
 
-    /// ~/Library/Application Support/Sloth-listwise-Bopomofo
-    @objc static var applicationSupportRoot: String {
+    /// ~/Library/Application Support/Sloth-listwise-Bopomofo. Under XCTest, a
+    /// per-run temp folder instead, so tests never read or write the user's
+    /// real phrases or installed model.
+    @objc static var applicationSupportRoot: String { resolvedApplicationSupportRoot }
+
+    private static let resolvedApplicationSupportRoot: String = {
+        if isRunningUnderXCTest {
+            let root = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+                "\(applicationSupportFolderName)-tests-\(ProcessInfo.processInfo.processIdentifier)")
+            try? FileManager.default.removeItem(atPath: root)
+            return root
+        }
         let paths = NSSearchPathForDirectoriesInDomains(
             .applicationSupportDirectory, .userDomainMask, true)
         let appSupportPath = paths.first!
         return (appSupportPath as NSString).appendingPathComponent(applicationSupportFolderName)
-    }
+    }()
 
     /// <root>/models. Always under the application-support root, never under a
     /// custom user phrase location.

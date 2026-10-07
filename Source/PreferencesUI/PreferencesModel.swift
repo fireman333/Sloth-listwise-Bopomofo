@@ -172,11 +172,11 @@ final class PreferencesViewModel: NSObject, ObservableObject {
 
     var checkForUpdatesAutomatically: Bool {
         get {
-            UserDefaults.standard.object(forKey: "CheckUpdateAutomatically") as? Bool ?? true
+            Preferences.defaults.object(forKey: "CheckUpdateAutomatically") as? Bool ?? true
         }
         set {
             objectWillChange.send()
-            UserDefaults.standard.set(newValue, forKey: "CheckUpdateAutomatically")
+            Preferences.defaults.set(newValue, forKey: "CheckUpdateAutomatically")
         }
     }
 
@@ -283,7 +283,7 @@ final class PreferencesViewModel: NSObject, ObservableObject {
         loadBasisKeyboardLayoutOptions()
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
-            object: UserDefaults.standard,
+            object: Preferences.defaults,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in

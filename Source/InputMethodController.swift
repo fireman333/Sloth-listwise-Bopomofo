@@ -168,7 +168,7 @@ class McBopomofoInputMethodController: IMKInputController {
     // MARK: - IMKStateSetting protocol methods
 
     override func activateServer(_ client: Any!) {
-        UserDefaults.standard.synchronize()
+        Preferences.defaults.synchronize()
 
         // Override the keyboard layout. Use US if not set.
         (client as? IMKTextInput)?.overrideKeyboard(
@@ -195,7 +195,7 @@ class McBopomofoInputMethodController: IMKInputController {
         (client as? IMKTextInput)?.overrideKeyboard(
             withKeyboardNamed: Preferences.basisKeyboardLayout)
         if keyHandler.inputMode != newInputMode {
-            UserDefaults.standard.synchronize()
+            Preferences.defaults.synchronize()
             // Remember to override the keyboard layout again -- treat this as an activate event.
             keyHandler.clear()
             keyHandler.inputMode = newInputMode

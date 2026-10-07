@@ -30,11 +30,16 @@
 
 ## 5. 並存實測（需已安裝原版小麥注音；只能人工執行）
 
-- [ ] 5.1 前置：確認 `~/Library/Input Methods/McBopomofo.app` 為原版（`codesign -dv --verbose=2` 顯示上游簽章、`defaults read ~/Library/Input\ Methods/McBopomofo.app/Contents/Info.plist CFBundleShortVersionString` 為上游版本），並記下 `shasum -a 256` 與 `ls -la ~/Library/Application\ Support/McBopomofo/`。Verify: 結果記錄於 `../PLAN.md`。
+- [x] 5.1 前置：確認 `~/Library/Input Methods/McBopomofo.app` 為原版（`codesign -dv --verbose=2` 顯示上游簽章、`defaults read ~/Library/Input\ Methods/McBopomofo.app/Contents/Info.plist CFBundleShortVersionString` 為上游版本），並記下 `shasum -a 256` 與 `ls -la ~/Library/Application\ Support/McBopomofo/`。Verify: 結果記錄於 `../PLAN.md`。
+  - 2026-10-07 實機：原版 McBopomofo 1.0，Developer ID Application: Lukhnos Liu (PYD935QB58)；App 檔案 hash cd3b9382…；`~/Library/Application Support/McBopomofo/` 為空；defaults md5 c6fd3508…。
 - [ ] 5.2 安裝：Release build 複製到 `~/Library/Input Methods/`，執行 `~/Library/Input\ Methods/Sloth-listwise-Bopomofo.app/Contents/MacOS/Sloth-listwise-Bopomofo install --all`，登出再登入。Verify: `codesign --verify --deep --strict` 對新 App 成功；原版 `McBopomofo.app` 的 `shasum` 與 5.1 相同；系統設定 > 鍵盤 > 輸入來源同時列出「小麥注音」與「Sloth-listwise Bopomofo」並可同時啟用。
+  - 2026-10-07 實機：Release b5824b5 已安裝，codesign strict OK；須重新開機後才出現在系統設定清單（ad-hoc 簽章仍可用）。原版 App hash 與 5.1 相同。待確認：輸入來源清單同時列出兩者（目前原版未啟用）。
 - [ ] 5.3 實際打字：在 TextEdit 以兩者輪流輸入同一句、各自開選單看 About / 偏好設定名稱、在新 App 加一個使用者詞。Verify: 兩者都能正常組字送出；新詞只出現在 `~/Library/Application Support/Sloth-listwise-Bopomofo/data.txt`，`~/Library/Application Support/McBopomofo/` 列表與 5.1 相同；選單名稱為 `Sloth-listwise Bopomofo`。
-- [ ] 5.4 偏好設定隔離：在新 App 偏好設定改一項。Verify: `defaults read io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo` 出現該項，`defaults read org.openvanilla.inputmethod.McBopomofo` 無變化。
+  - 2026-10-07 實機：新 App 打字正常（R-walk 開／關各一句）；新增使用者詞「與台」只寫入新 root 的 data.txt，原版資料夾仍為空（測後已刪除該詞）。待做：與原版輪流打同一句、檢查選單名稱。
+- [x] 5.4 偏好設定隔離：在新 App 偏好設定改一項。Verify: `defaults read io.github.fireman333.inputmethod.Sloth-listwise-Bopomofo` 出現該項，`defaults read org.openvanilla.inputmethod.McBopomofo` 無變化。
+  - 2026-10-07 實機：`defaults write` AFMNeuralWalkEnabled 只出現在新 domain；原版 domain md5 與 5.1 相同。
 - [ ] 5.5 首次啟動不遷移、不連上游更新：刪除新 root 後重啟新 App。Verify: 新 root 的 `data.txt` 只有 template 內容；Console.app 以程序名過濾無對 `mcbopomofo.openvanilla.org` 的請求、無「有新版本」提示。
+  - 2026-10-07 實機：新 root 首次建立時只有 template 檔與 models（無遷移）。網路：App 程式碼無任何 URL、更新端點已移除，原因已查明：預編譯 onnxruntime 1.30 內建 Microsoft 1DS telemetry，載入模型時 POST 到 Microsoft Azure（4.207.44.76、40.79.141.156）。已以 `ORT_DISABLE_TELEMETRY=1` + `Env::DisableTelemetryEvents()` 關閉（`Source/Engine/Rescorer/ort_env.h`），重裝後 nettop 40 秒內 0 條外連、0 個 URL task。剩「刪除新 root 後重啟」未做，未勾。
 
 ## 6. 文件同步
 

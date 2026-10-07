@@ -2,6 +2,8 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "ort_env.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -32,7 +34,7 @@ inline double Softplus(double x) { return std::max(x, 0.0) + std::log1p(std::exp
 }  // namespace
 
 struct ElectraRescorer::Impl {
-  Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "ElectraRescorer"};
+  Ort::Env env = MakeOfflineOrtEnv("ElectraRescorer");
   std::unique_ptr<Ort::Session> session;
   std::unordered_map<std::string, int64_t> vocab;
   int64_t pad = 0, unk = 100, cls = 101, sep = 102;
