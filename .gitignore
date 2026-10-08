@@ -28,3 +28,4 @@ build-selection*/
 *.profraw
 build-llama/
 build-trainer/
+CompilationCache.noindex/
