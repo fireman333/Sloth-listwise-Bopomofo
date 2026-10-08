@@ -2,13 +2,13 @@
 
 > **非官方 fork（Unofficial fork）**：本專案是 [McBopomofo 小麥注音](https://github.com/openvanilla/McBopomofo) 的個人分支，與小麥注音官方團隊沒有關聯，也未經其背書。This is an independent fork, not affiliated with or endorsed by the McBopomofo project.
 
-> **English summary.** A macOS Zhuyin (Bopomofo) input method forked from [McBopomofo](https://github.com/openvanilla/McBopomofo) (MIT). A 12M-parameter on-device model (SlothLM-E, fine-tuned on license-clean data) adds per-character scores inside McBopomofo's n-gram walk. On a 1,495-sentence general test set it raises sentence accuracy from 62.2% (stock McBopomofo) to 76.4%, at about 2.9 ms p50 / 3.9 ms p95 per keystroke inside the app process. An optional "precise mode" (off by default) calls Qwen3-0.6B in the background only when the small model is unsure (~40% of sentences) and reaches 82.5% on the same test set. Two on-device personalization layers are included: a persistent memory of your manual picks, and an optional local fine-tune of the small model (LoRA, trained on your own committed sentences by a separate background helper, adopted only if it passes held-out accuracy gates; one click returns to the factory model). Everything runs locally; typed text never leaves the machine. Status: personal pre-release, Apple Silicon + macOS 26 only, not signed or notarized.
+> **English summary.** A macOS Zhuyin (Bopomofo) input method forked from [McBopomofo](https://github.com/openvanilla/McBopomofo) (MIT). A 12M-parameter on-device rescoring model, called **R** in this README (fine-tuned from SlothLM-E on license-clean data), adds per-character scores inside McBopomofo's n-gram walk. On a 1,495-sentence general test set it raises sentence accuracy from 62.2% (stock McBopomofo) to 76.4%, at about 2.9 ms p50 / 3.9 ms p95 per keystroke inside the app process. An optional "precise mode" (off by default) calls Qwen3-0.6B in the background only when the small model is unsure (~40% of sentences) and reaches 82.5% on the same test set. Two on-device personalization layers are included: a persistent memory of your manual picks, and an optional local fine-tune of the small model (LoRA, trained on your own committed sentences by a separate background helper, adopted only if it passes held-out accuracy gates; one click returns to the factory model). Everything runs locally; typed text never leaves the machine. Status: personal pre-release, Apple Silicon + macOS 26 only, not signed or notarized.
 
 ---
 
 ## 這是什麼
 
-一個 macOS 注音輸入法。基底是小麥注音（McBopomofo），選字時多了一個在本機執行的小模型 R，幫忙判斷同音字。
+一個 macOS 注音輸入法。基底是小麥注音（McBopomofo），選字時多了一個在本機執行的選字小模型，本文簡稱 **R**（取自 Rescorer，「重新評分器」），幫忙判斷同音字。
 
 - **每一鍵**：小麥原本的詞頻選字（n-gram walk）＋ R 對每個字的上下文打分，一起決定組字區顯示什麼。約 13 MB 的 int8 模型，CPU 執行。
 - **精準模式（選配，預設關閉）**：R 沒把握時，在背景請 Qwen3-0.6B 一起評分，合併後更新組字區。打字不會等它。需另外放入約 600 MB 的模型檔。
@@ -16,6 +16,15 @@
 - **個人化模型（選配）**：用你自己打過的句子，在你的 Mac 上微調 R；通過驗收才換上，隨時可以退回。
 - **全部在本機**：不連雲端。打字內容不離開你的電腦。
 - 可以和原版小麥注音同時安裝、互不干擾（不同 bundle id、不同使用者資料夾）。
+
+### 名詞速查
+
+| 名詞 | 意思 |
+|---|---|
+| **R**（Rescorer） | 本專案的選字小模型。它不自己產生候選字，而是替小麥列出的每個同音字依整句上下文重新打分。由公開的注音模型 SlothLM-E（約 1,200 萬參數）微調而來，量化後約 13 MB。 |
+| **R-walk** | 把 R 的分數直接加進小麥原本的選字路徑（walk）裡的做法，也就是輸入法每一鍵實際在跑的東西。 |
+| **精準模式** | 選配功能：R 沒把握時，在背景另外請較大的 Qwen3-0.6B 一起評分。 |
+| **個人化模型** | 用你自己的句子在本機微調過的 R（LoRA 微調），通過驗收才會換上。 |
 
 ## 原理（不用 ML 背景也看得懂的版本）
 

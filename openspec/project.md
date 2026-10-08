@@ -13,7 +13,7 @@ macOS 注音輸入法（fork 小麥注音 McBopomofo），每鍵用本機小模�
 
 ## Stack & Constraints
 
-- App：Swift + Objective-C++（InputMethodKit），fork 自 openvanilla/McBopomofo（MIT），分支 `afm-rescoring`
+- App：Swift + Objective-C++（InputMethodKit），fork 自 openvanilla/McBopomofo（MIT），主分支 `main`（原名 afm-rescoring，2026-10-08 改名）
 - 選字引擎：C++（`Source/Engine/gramambular2`、`Source/Engine/Rescorer`）
 - 推論：onnxruntime 1.30（R / D / ELECTRA int8，CPU）；llama.cpp + Metal（Qwen3-0.6B-Base q8_0）
 - 平台：Apple Silicon、macOS 26+；開發用 Xcode 27
