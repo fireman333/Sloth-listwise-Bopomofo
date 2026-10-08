@@ -88,7 +88,7 @@ Learning SHALL be on by default. When learning is off, the system SHALL remember
 - **THEN** from the next activation the saved picks are suggested again
 
 ### Requirement: Clearing learning data
-The user SHALL be able to clear all learning data with one action from the preferences, after confirming. Clearing SHALL delete the selection memory file, the sentence pool, and any files set aside as unreadable, and SHALL empty the in-memory selection memory immediately, so that no previously learned pick is suggested afterwards. A save or record that was pending before the clear SHALL NOT recreate cleared data; a composition committed after the clear is recorded as new data. Clearing SHALL NOT change user phrases, excluded phrases, phrase replacements, models or other preferences, and SHALL NOT change the learning switch.
+The user SHALL be able to clear all learning data with one action from the preferences, after confirming. Clearing SHALL delete the selection memory file, the sentence pool, any files set aside as unreadable, and all personalized model versions with their training status (personal-finetune "Clearing removes personalization"), SHALL empty the in-memory selection memory immediately, so that no previously learned pick is suggested afterwards, and SHALL return the selection model to the factory weights from the next activation. A save, record, training result or personalized load that was pending before the clear SHALL NOT recreate cleared data or be used afterwards; a composition committed after the clear is recorded as new data. Clearing SHALL NOT change user phrases, excluded phrases, phrase replacements, the factory model files or other preferences, and SHALL NOT change the learning switch.
 
 #### Scenario: Clear and type again
 - **WHEN** the user clears learning data and types readings in a context that had a remembered pick
@@ -101,6 +101,10 @@ The user SHALL be able to clear all learning data with one action from the prefe
 #### Scenario: Other user data untouched
 - **WHEN** the user clears learning data
 - **THEN** the user phrase, excluded phrase and phrase replacement files, the model files and all preferences are unchanged
+
+#### Scenario: Clear with a personalized version in use
+- **WHEN** the user clears learning data while a personalized version of the selection model is in use
+- **THEN** every personalized version and its status are deleted, the factory model files are unchanged, and from the next activation the factory weights are used
 
 ### Requirement: First-run notice
 The first time the input method is activated with learning on and the notice has not been shown before, the system SHALL show a notice in Traditional Chinese stating that the input method learns from the user's typing and manual picks, that this data is kept on this Mac and is never sent over the network by the input method, and that learning can be turned off and the data cleared in the 「選字模型」 preferences tab. The notice SHALL offer a button 「好」 that closes it and a button 「打開設定」 that opens that tab, operable with the mouse. The notice SHALL NOT take keyboard focus or activate the input method's process: keystrokes typed while it is visible SHALL go to the client application within the 10 ms p95 budget. It SHALL be shown at most once per user and SHALL NOT change any setting by itself.

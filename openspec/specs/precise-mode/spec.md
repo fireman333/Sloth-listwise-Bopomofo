@@ -83,7 +83,7 @@ Positions fixed by a manual candidate pick or by an applied user-override-model 
 - **THEN** the picked character stays at that position
 
 ### Requirement: Heavy model and calibration files
-The system SHALL load the heavy re-ranking model and its calibration parameters from the `models/qwen/` subdirectory of the application-support directory defined by the app-identity capability, and SHALL NOT require them to be bundled in the application. The model and calibration SHALL be treated as one unit: if either file is missing, unreadable, or invalid, or if the calibration's R-walk weight differs from the R-walk weight in use, precise mode SHALL be unavailable, the failure SHALL be logged once, and typing SHALL continue with R-walk within the 10 ms p95 per-keystroke budget and without any blocking error.
+The system SHALL load the heavy re-ranking model and its calibration parameters from the `models/qwen/` subdirectory of the application-support directory defined by the app-identity capability, and SHALL NOT require them to be bundled in the application. The model and calibration SHALL be treated as one unit: if either file is missing, unreadable, or invalid, or if the calibration's R-walk weight differs from the R-walk weight in use, precise mode SHALL be unavailable, the failure SHALL be logged once, and typing SHALL continue with R-walk within the 10 ms p95 per-keystroke budget and without any blocking error. When R runs with a personalized version (personal-finetune capability), the R-dependent part of the calibration (the confidence temperatures) SHALL be taken from the calibration refitted for that version and stored with it, and the remaining parameters from `models/qwen/`; if that refitted calibration is missing, invalid, or belongs to a different version, precise mode SHALL be unavailable in the same way.
 
 #### Scenario: Calibration file missing or invalid
 - **WHEN** the model file exists but the calibration file is missing or contains an unknown key
@@ -96,6 +96,16 @@ The system SHALL load the heavy re-ranking model and its calibration parameters 
 #### Scenario: Model directory missing
 - **WHEN** precise mode is enabled and `models/qwen/` does not exist
 - **THEN** the input method keeps working with R-walk and the preferences show that the model was not found
+
+#### Scenario: Personalized R with its calibration
+- **WHEN** precise mode is enabled and R runs with a personalized version whose refitted calibration is present
+- **THEN** the gate uses the refitted temperatures and the other parameters from `models/qwen/`
+
+#### Scenario: Personalized R without matching calibration
+- **WHEN** precise mode is enabled and R runs with a personalized version whose refitted calibration is missing
+- **THEN** precise mode reports failed to load and typing uses R-walk with the personalized weights
+</content>
+</invoke>
 
 ### Requirement: Heavy model lifecycle
 Precise mode SHALL be off by default. The heavy model SHALL be loaded off the main thread whenever precise mode is enabled — at input-method start or activation if the preference is already on, and immediately when the user turns it on — and SHALL be released when precise mode is disabled; pending and in-flight results SHALL then be discarded, including results from an earlier enable/disable cycle. Loading, failure, and release SHALL NOT block key handling, activation, or candidate display (every keystroke within the 10 ms p95 budget), and SHALL NOT crash the input method. While the heavy model is not ready, R-walk alone SHALL be used.
