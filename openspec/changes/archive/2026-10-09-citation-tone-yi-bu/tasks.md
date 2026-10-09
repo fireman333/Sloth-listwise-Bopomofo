@@ -13,7 +13,7 @@
 - [x] 2.1 Debug `xcodebuild test` green (existing suites) — 330 XCTest (4 env-gated skips) + 96 Swift Testing pass (before and after /simplify)
 - [x] 2.2 In-process latency (`NeuralSelectorTests/testInProcessLatencyUpTo40Syllables`, Release arm64): p95 < 10 ms, compared with main — full-keystroke p95 3.78 ms (after /simplify 3.82 ms), max 6.2 ms, 0 keystrokes > 10 ms, breaker ready; main's recorded range 3.67–3.81 ms
 - [x] 2.3 C++ `rescorer_bench` R-walk on general test with the change vs main (record accuracy; expected ≈ +0.1 pt) — R-walk α 0.5: 1,143 → 1,144 / 1,495 (76.5 %, b/c 1/0: 漸漸行動不便); precise mode (precise.conf) 82.47 → 82.54 % (1/0); outputs `../bench/out/general/precise_cite/`
-- [ ] 2.4 Real-install check: type ㄅㄨˋㄧㄠˋ in TextEdit, 不要 is composed and offered in the candidate window (needs the user at the Mac)
+- [x] 2.4 Real-install check: type ㄅㄨˋㄧㄠˋ in TextEdit, 不要 is composed and offered in the candidate window (needs the user at the Mac) — PASSED 2026-10-09 ~12:50 by the user: ㄅㄨˋㄧㄠˋ and ㄅㄨˊㄧㄠˋ both give 不要 (composed + candidate window)
 
 ## 3. Wrap-up
 
