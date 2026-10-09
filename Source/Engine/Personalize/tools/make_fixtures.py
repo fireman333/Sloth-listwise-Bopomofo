@@ -101,23 +101,23 @@ def nbest_fixture():
         engine.setdefault(j["text"], j.get("engine", ""))
     rows = [json.loads(l) for l in open(os.path.join(e5, "rows.jsonl"), encoding="utf-8")]
     cv = [json.loads(l) for l in open(os.path.join(e5, "rows_cv.jsonl"), encoding="utf-8")]
-    cpp = {}
-    for fn in ("cpp_nbest_full_e5.jsonl", "cpp_nbest_full_e5cv.jsonl"):
-        cpp.update({j["id"]: j for j in (json.loads(l) for l in open(os.path.join(e5, fn), encoding="utf-8"))})
-    from decoder import Decoder
+    # Since change citation-tone-yi-bu the engine also finds 一/不 phrases listed under the other tone form, so the
+    # fixture comes from the Python decoder with the same lookup (E5 showed C++ == Python; the gtest re-checks it).
+    import decoder
+    from decoder import Decoder, add_citation_tone_variants
+    decoder.round = lambda x, n=None: x          # full-precision scores (as e5_compare.py)
     dec = Decoder()
+    add_citation_tone_variants(dec)
     pool = [r for r in rows if r["id"].startswith("pool") and engine.get(r["text"], "").startswith("mlx:")][:10]
     rep = cv[:10]
     assert len(pool) == 10 and len(rep) == 10
     with open(os.path.join(TD, "nbest_fixture.jsonl"), "w", encoding="utf-8") as f:
         for r in pool + rep:
-            c = cpp[r["id"]]
             py = dec.decode(r["reading"], k=50)
             texts = [x["text"] for x in py]
-            assert texts == c["nbest"], r["id"]  # E5: identical (C++ == Python)
             gold = texts.index(r["text"]) if r["text"] in texts else -1
-            f.write(json.dumps({"id": r["id"], "reading": r["reading"], "text": r["text"], "nbest": c["nbest"],
-                                "ngram": [float(s) for s in c["ngram"]], "gold": gold}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"id": r["id"], "reading": r["reading"], "text": r["text"], "nbest": texts,
+                                "ngram": [float(x["ngram_score"]) for x in py], "gold": gold}, ensure_ascii=False) + "\n")
 
 
 def perturbed_linears():

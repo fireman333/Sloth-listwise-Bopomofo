@@ -74,6 +74,7 @@ if (ENABLE_TEST)
         add_executable(McBopomofoLMLibTest
                 AssociatedPhrasesV2Test.cpp
                 ByteBlockBackedDictionaryTest.cpp
+                CitationToneTest.cpp
                 McBopomofoLMTest.cpp
                 MemoryMappedFileTest.cpp
                 NBestEquivalenceTest.cpp

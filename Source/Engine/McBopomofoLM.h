@@ -169,6 +169,23 @@ class McBopomofoLM : public Formosa::Gramambular2::LanguageModel {
       std::unordered_set<std::string>& insertedValues,
       bool isUserPhrase = false) const;
 
+  // Citation / sandhi tones of 一 (ㄧ ㄧˊ ㄧˋ) and 不 (ㄅㄨˋ ㄅㄨˊ): for a
+  // multi-syllable key, calls `visit` for every built-in entry listed under
+  // another tone form of those syllables whose character at that position is
+  // 一 / 不 (reading policy applied with the listed syllables). Stops early when
+  // `visit` returns false.
+  void forEachToneVariantUnigram(
+      const std::string& key,
+      const std::function<bool(
+          const Formosa::Gramambular2::LanguageModel::Unigram&)>& visit);
+
+  // Appends the forEachToneVariantUnigram entries of `key` to `rawUnigrams`,
+  // keeping the highest score per value, and re-sorts by score if anything
+  // changed.
+  void appendToneVariantUnigrams(
+      const std::string& key,
+      std::vector<Formosa::Gramambular2::LanguageModel::Unigram>& rawUnigrams);
+
   // True if any position i has (syllables[i], i-th code point of value) in
   // readingPolicyExclusions_. False when the lengths differ.
   bool violatesReadingPolicy(const std::vector<std::string>& syllables,

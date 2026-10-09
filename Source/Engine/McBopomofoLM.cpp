@@ -169,9 +169,9 @@ McBopomofoLM::getUnigrams(const std::string& key) {
                                               /*isUserPhrase=*/true);
   }
 
+  std::vector<Formosa::Gramambular2::LanguageModel::Unigram> rawGlobalUnigrams;
   if (languageModel_.hasUnigrams(key)) {
-    std::vector<Formosa::Gramambular2::LanguageModel::Unigram>
-        rawGlobalUnigrams = languageModel_.getUnigrams(key);
+    rawGlobalUnigrams = languageModel_.getUnigrams(key);
     if (!readingPolicyExclusions_.empty()) {
       // Reading policy applies to built-in entries only, on raw values
       // (before phrase replacement, macros and the external converter).
@@ -192,6 +192,9 @@ McBopomofoLM::getUnigrams(const std::string& key) {
             rawGlobalUnigrams.end());
       }
     }
+  }
+  appendToneVariantUnigrams(key, rawGlobalUnigrams);
+  if (!rawGlobalUnigrams.empty()) {
     allUnigrams = filterAndTransformUnigrams(rawGlobalUnigrams, excludedValues,
                                              insertedValues);
   }
@@ -251,10 +254,117 @@ bool McBopomofoLM::hasUnigrams(const std::string& key) {
   }
 
   if (!excludedPhrases_.hasUnigrams(key)) {
-    return userPhrases_.hasUnigrams(key) || languageModel_.hasUnigrams(key);
+    if (userPhrases_.hasUnigrams(key) || languageModel_.hasUnigrams(key)) {
+      return true;
+    }
+    bool found = false;
+    forEachToneVariantUnigram(key, [&](const auto&) {
+      found = true;
+      return false;
+    });
+    return found;
   }
 
   return !getUnigrams(key).empty();
+}
+
+namespace {
+struct ToneForms {
+  const char* character;
+  std::vector<std::string> syllables;
+};
+
+const std::vector<ToneForms>& YiBuToneForms() {
+  static const std::vector<ToneForms> forms{{"一", {"ㄧ", "ㄧˊ", "ㄧˋ"}},
+                                            {"不", {"ㄅㄨˋ", "ㄅㄨˊ"}}};
+  return forms;
+}
+
+// At most this many 一 / 不 positions of a key are expanded (design D2).
+constexpr size_t kMaxToneVariantPositions = 3;
+}  // namespace
+
+void McBopomofoLM::forEachToneVariantUnigram(
+    const std::string& key,
+    const std::function<bool(
+        const Formosa::Gramambular2::LanguageModel::Unigram&)>& visit) {
+  if (key.find(Formosa::Gramambular2::ReadingGrid::kDefaultSeparator) ==
+      std::string::npos) {
+    return;
+  }
+  std::vector<std::string> syllables = AssociatedPhrasesV2::SplitReadings(key);
+  // (position, tone forms) for each 一 / 不 syllable in the key.
+  std::vector<std::pair<size_t, const ToneForms*>> positions;
+  for (size_t i = 0; i < syllables.size() &&
+                     positions.size() < kMaxToneVariantPositions;
+       ++i) {
+    for (const auto& forms : YiBuToneForms()) {
+      if (std::find(forms.syllables.begin(), forms.syllables.end(),
+                    syllables[i]) != forms.syllables.end()) {
+        positions.emplace_back(i, &forms);
+      }
+    }
+  }
+  if (positions.empty()) {
+    return;
+  }
+
+  std::vector<std::string> alt = syllables;
+  std::vector<size_t> choice(positions.size(), 0);
+  while (true) {
+    for (size_t p = 0; p < positions.size(); ++p) {
+      alt[positions[p].first] = positions[p].second->syllables[choice[p]];
+    }
+    std::string altKey = AssociatedPhrasesV2::CombineReadings(alt);
+    if (alt != syllables && languageModel_.hasUnigrams(altKey)) {
+      for (const auto& u : languageModel_.getUnigrams(altKey)) {
+        std::vector<std::string> chars = Split(u.value());
+        bool keep =
+            chars.size() == alt.size() &&
+            std::all_of(positions.begin(), positions.end(), [&](const auto& p) {
+              return alt[p.first] == syllables[p.first] ||
+                     chars[p.first] == p.second->character;
+            });
+        if (keep && !violatesReadingPolicy(alt, u.value()) && !visit(u)) {
+          return;
+        }
+      }
+    }
+    // Next combination (odometer over the tone forms of each position).
+    size_t p = 0;
+    while (p < positions.size() &&
+           ++choice[p] == positions[p].second->syllables.size()) {
+      choice[p] = 0;
+      ++p;
+    }
+    if (p == positions.size()) {
+      return;
+    }
+  }
+}
+
+void McBopomofoLM::appendToneVariantUnigrams(
+    const std::string& key,
+    std::vector<Formosa::Gramambular2::LanguageModel::Unigram>& rawUnigrams) {
+  bool changed = false;
+  forEachToneVariantUnigram(key, [&](const auto& u) {
+    auto it = std::find_if(rawUnigrams.begin(), rawUnigrams.end(),
+                           [&](const auto& x) { return x.value() == u.value(); });
+    if (it == rawUnigrams.end()) {
+      rawUnigrams.push_back(u);
+      changed = true;
+    } else if (u.score() > it->score()) {
+      *it = u;
+      changed = true;
+    }
+    return true;
+  });
+  if (changed) {
+    std::stable_sort(rawUnigrams.begin(), rawUnigrams.end(),
+                     [](const auto& a, const auto& b) {
+                       return a.score() > b.score();
+                     });
+  }
 }
 
 std::string McBopomofoLM::getReading(const std::string& value) const {
